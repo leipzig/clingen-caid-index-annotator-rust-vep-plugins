@@ -1,5 +1,6 @@
 //! ClinGen Allele Registry CA-ID annotation for GRCh38 variants.
 
+mod annotator;
 mod contig;
 mod hgvs;
 mod index;
@@ -8,6 +9,7 @@ pub mod test_support;
 
 use std::path::PathBuf;
 
+pub use annotator::{Annotator, Lookup, Stats, Status};
 pub use contig::{Contig, resolve_contig};
 pub use hgvs::{HgvsResult, canonical_hgvs};
 pub use index::{CaIndex, IndexBuilder, Manifest, format_caid, parse_caid};
