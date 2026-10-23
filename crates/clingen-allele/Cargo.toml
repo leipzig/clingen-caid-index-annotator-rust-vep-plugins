@@ -6,7 +6,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Tiny synthetic genome for tests, here and in downstream crates.
+test-support = ["dep:tempfile"]
+
 [dependencies]
 fst = "0.4"
+tempfile = { version = "3", optional = true }
 thiserror = "2"
 vareffect = "0.6"
+
+[dev-dependencies]
+# Self dev-dependency: turns on `test-support` for this crate's own tests under
+# a plain `cargo test`, without `required-features` silently skipping them.
+clingen-allele = { path = ".", features = ["test-support"] }

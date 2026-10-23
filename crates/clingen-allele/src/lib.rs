@@ -1,10 +1,14 @@
 //! ClinGen Allele Registry CA-ID annotation for GRCh38 variants.
 
 mod contig;
+mod hgvs;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 use std::path::PathBuf;
 
 pub use contig::{Contig, resolve_contig};
+pub use hgvs::{HgvsResult, canonical_hgvs};
 
 /// Errors produced by the `clingen-allele` crate.
 #[derive(Debug, thiserror::Error)]
