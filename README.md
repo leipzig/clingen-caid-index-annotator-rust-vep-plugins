@@ -142,8 +142,15 @@ For fastVEP, a symlink puts the index in an `--sa-dir`:
 mkdir -p data/sa_clingen && ln -sfn ../index_chr21 data/sa_clingen/clingen_chr21
 ```
 
-Both tools print one tally on stderr at the end of the run:
-`ClinGen: found=… not_in_index=… ref_mismatch=… unsupported=…`.
+At the end of a run both tools report one tally,
+`ClinGen: found=… not_in_index=… ref_mismatch=… unsupported=…`, which counts
+each allele once. `found` and `not_in_index` count alleles with an HGVS, with
+and without a CA ID; `ref_mismatch` counts a REF the genome disagrees with;
+`unsupported` counts every other allele, including the ones a tool skips
+(symbolic, `*`, REF equal to ALT). fastVEP prints the line on stderr. vep-rs
+logs it at info level, after its log's time, level and source, so `--quiet`
+hides it ([toy run](#4-run-the-toy-vcf)). The two tallies agree, except that
+fastVEP counts an ALT repeated within one record (`C` → `T,T`) once.
 
 ### 4. Run the toy VCF
 
@@ -186,13 +193,26 @@ subfields are `ClinGen_CAID` and `ClinGen_HGVSg`:
 
 ```
 clingen-allele: genome lookup failed for contig 'chrM' (reference genome error: chromosome 'chrM' not found in genome index); variants on this contig are reported Unsupported
-ClinGen: found=3 not_in_index=1 ref_mismatch=1 unsupported=1
 snv	CSQ=T|intergenic_variant|MODIFIER|||||||||||||||||||||CA749862939|NC_000021.9:g.5030578C>T
 ins_left	CSQ=A|intergenic_variant|MODIFIER|||||||||||||||||||||CA636937543|NC_000021.9:g.13189788dup
 ins_right	CSQ=A|intergenic_variant|MODIFIER|||||||||||||||||||||CA636937543|NC_000021.9:g.13189788dup
 del_novel	CSQ=-|intergenic_variant|MODIFIER||||||||||||||||||||||NC_000021.9:g.33000172del
 melas	CSQ=G|intergenic_variant|MODIFIER||||||||||||||||||||||
 bad_ref	CSQ=G|intergenic_variant|MODIFIER||||||||||||||||||||||
+```
+
+The warning comes from `clingen-allele` itself. vep-rs's tally is not there,
+because `--quiet` keeps only errors in vep-rs's log. To see it, run without
+`--quiet`; `NO_COLOR=1` keeps colour codes out of the log:
+
+```bash
+NO_COLOR=1 offline ../vep-rs/target/release/vep -i examples/toy.vcf -o data/toy/vep-rs.vcf \
+    --vcf --offline --assembly GRCh38 --force_overwrite --no_stats \
+    --plugin ClinGen,index=data/index_chr21 2>&1 | grep 'ClinGen:'
+```
+
+```
+2026-10-23T23:16:25.622574Z  INFO vep_builtins::plugins::clingen: ClinGen: found=3 not_in_index=1 ref_mismatch=1 unsupported=1
 ```
 
 **fastVEP:**
@@ -268,14 +288,21 @@ python3 -I scripts/e2e_crosscheck.py --harvest data/chr21_chunks \
     --vcf-out data/e2e/fastvep.vcf --tool fastvep
 ```
 
-Result (2026-10-23; clingen `feature/clingen-allele`, vep-rs `0d54dec`,
-fastVEP `47a059f`). The two annotation runs:
+Result (2026-10-23; clingen `feature/clingen-allele` at `2d0347c`, vep-rs
+`c3a9af6`, fastVEP `46dce28`). The two annotation runs print this on stderr,
+all of it from fastVEP:
 
 ```
-ClinGen: found=100000 not_in_index=0 ref_mismatch=0 unsupported=0
 Annotating: data/e2e/chr21_100k.vcf -> data/e2e/fastvep.vcf
 Loaded 1 supplementary annotation source(s) from data/sa_clingen in 0.0s
 ClinGen: found=100000 not_in_index=0 ref_mismatch=0 unsupported=0
+```
+
+vep-rs prints nothing, because of `--quiet`. Run without it, and with
+`NO_COLOR=1` as in the [toy run](#4-run-the-toy-vcf), its log ends with:
+
+```
+2026-10-23T23:11:46.034190Z  INFO vep_builtins::plugins::clingen: ClinGen: found=100000 not_in_index=0 ref_mismatch=0 unsupported=0
 ```
 
 The vep-rs check, then the fastVEP check (both exit 0):
@@ -302,27 +329,29 @@ the harvest's `HGVS_GRCh38` for all 100,000 alleles, checked separately.
 
 ### Throughput
 
-Wall clock for the 100,000-record VCF: the median of 10 runs, with a warm
-page cache, release builds, and process start and `sandbox-exec` included.
+Wall clock for the 100,000-record VCF: the median of 10 runs after two
+warm-up runs, with a warm page cache, release builds, and process start and
+`sandbox-exec` included. Measured on 2026-10-23 with the commits above, on an
 Apple M6 (12 cores: 2 Super, 4 Performance, 6 Efficiency), 32 GB, macOS
-27.0.1. Neither tool predicts consequences in these runs (vep-rs has no
-`--json_cache`, fastVEP runs `--sa-only`), so the times are VCF parsing, the
-ClinGen lookups and writing, without the consequence prediction a full run
-adds.
+27.0.1, while other work kept the load average near 5. A second set of 10
+runs came within 0.008 s of every median. Neither tool predicts consequences
+in these runs (vep-rs has no `--json_cache`, fastVEP runs `--sa-only`), so
+the times are VCF parsing, the ClinGen lookups and writing, without the
+consequence prediction a full run adds.
 
 | Run | default threads (12) | 1 thread |
 |---|---:|---:|
-| vep-rs, `--plugin ClinGen` | 0.078 s | 0.127 s |
-| vep-rs, no plugin | 0.034 s | 0.077 s |
-| fastVEP `--sa-only`, ClinGen index | 0.128 s | 0.167 s |
-| fastVEP `--sa-only`, empty `--sa-dir` | 0.061 s | 0.052 s |
+| vep-rs, `--plugin ClinGen` | 0.081 s | 0.129 s |
+| vep-rs, no plugin | 0.033 s | 0.077 s |
+| fastVEP `--sa-only`, ClinGen index | 0.139 s | 0.170 s |
+| fastVEP `--sa-only`, empty `--sa-dir` | 0.063 s | 0.052 s |
 
 Threads are vep-rs's `--fork 0` (auto, 12 here) or `--fork 1`, and fastVEP's
-rayon default (12) or `RAYON_NUM_THREADS=1`. ClinGen adds 0.044–0.050 s per
-100,000 variants to vep-rs (0.4–0.5 µs each) and 0.067–0.115 s to fastVEP
-(0.7–1.2 µs each). On a one-record VCF every run takes 6–7 ms, so opening the
+rayon default (12) or `RAYON_NUM_THREADS=1`. ClinGen adds 0.048–0.052 s per
+100,000 variants to vep-rs (about 0.5 µs each) and 0.076–0.118 s to fastVEP
+(0.8–1.2 µs each). On a one-record VCF every run takes 6–7 ms, so opening the
 index and the genome costs next to nothing. With ClinGen, vep-rs annotates
-about 1.3 million variants a second here, fastVEP about 0.8 million.
+about 1.2 million variants a second here, fastVEP about 0.7 million.
 
 ## Harvest step: look up a toy VCF in the live Registry
 
