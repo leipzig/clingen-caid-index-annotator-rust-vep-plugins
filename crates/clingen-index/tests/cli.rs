@@ -154,6 +154,38 @@ fn build_records_a_relative_genome_as_an_absolute_canonical_path() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn build_keeps_a_symlinked_genome_file_name() {
+    // A content-addressed store: genome.bin and genome.bin.idx are separate
+    // links, so only the link's own name has an `.idx` beside it.
+    let tmp = TempDir::new().unwrap();
+    write_chunk(&tmp.path().join("chunks"), "chunk_00000.tsv", &[SNV]);
+    let store = tmp.path().join("store");
+    let links = tmp.path().join("g");
+    fs::create_dir_all(&store).unwrap();
+    fs::create_dir_all(&links).unwrap();
+    fs::write(store.join("objA"), b"").unwrap();
+    fs::write(store.join("objB"), b"").unwrap();
+    std::os::unix::fs::symlink(store.join("objA"), links.join("genome.bin")).unwrap();
+    std::os::unix::fs::symlink(store.join("objB"), links.join("genome.bin.idx")).unwrap();
+
+    cli()
+        .current_dir(tmp.path())
+        .args(["build", "--chunks", "chunks", "--out", "index"])
+        .args(["--genome", "g/genome.bin"])
+        .assert()
+        .success();
+
+    let recorded = CaIndex::open(&tmp.path().join("index"))
+        .unwrap()
+        .manifest()
+        .genome
+        .clone();
+    let expected = fs::canonicalize(&links).unwrap().join("genome.bin");
+    assert_eq!(recorded.as_deref(), expected.to_str());
+}
+
 #[test]
 fn build_with_a_missing_or_non_file_genome_exits_2_and_writes_nothing() {
     let tmp = TempDir::new().unwrap();

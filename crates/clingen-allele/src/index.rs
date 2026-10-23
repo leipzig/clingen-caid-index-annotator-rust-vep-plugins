@@ -10,8 +10,10 @@
 //! [`IndexBuilder::finish`] writes each file under a temporary name and
 //! renames it into place, `caid.fst` first, so `manifest.json` is only ever
 //! present next to a complete `caid.fst`. A rebuild therefore never rewrites a
-//! file a running reader has mapped, and one that fails part-way leaves the
-//! previous index as it was.
+//! file a running reader has mapped, and one that fails before the first
+//! rename leaves the previous index as it was. A failure between the two
+//! renames leaves the new `caid.fst` beside the old manifest (see
+//! [`IndexBuilder::finish`]).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Write};

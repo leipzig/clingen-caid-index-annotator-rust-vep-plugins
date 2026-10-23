@@ -129,7 +129,7 @@ cargo run -p clingen-index --release -- build --chunks data/chr21_chunks \
 `build` records `--genome` in `manifest.json` as an absolute path, and both
 tools use it when they are not given a genome. Rebuilding into the same
 `--out` replaces the index by rename: a running tool keeps reading the old
-one, and a failed build leaves it in place. `build` holds every row in memory
+one, and a build that fails before the rename leaves it in place. `build` holds every row in memory
 (see [Known limitations](#known-limitations)). [chr21 index](#chr21-index)
 has its size.
 

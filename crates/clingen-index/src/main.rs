@@ -70,8 +70,8 @@ struct BuildArgs {
     #[arg(long, value_name = "LABEL")]
     source: Vec<String>,
     /// vareffect genome binary (`genome.bin`) to record in the manifest. It
-    /// must exist, and is recorded as an absolute, canonical path, so the
-    /// tools find it whatever directory they run in.
+    /// must exist, and is recorded as an absolute path (directory resolved,
+    /// file name kept), so the tools find it whatever directory they run in.
     #[arg(long, value_name = "PATH")]
     genome: Option<PathBuf>,
     /// Date the Registry was queried, recorded in the manifest.
@@ -270,20 +270,30 @@ fn read_rows(
 // build
 // ---------------------------------------------------------------------------
 
-/// `--genome` as the manifest records it: absolute and canonical.
+/// `--genome` as the manifest records it: its directory made absolute and
+/// canonical, its file name kept as given.
 ///
 /// Consumers resolve a relative manifest path against the index directory,
 /// so recording one relative to the working directory would name another
-/// file.
+/// file. The file name is not resolved because vareffect finds the genome's
+/// index at `<path>.idx`: when `genome.bin` and `genome.bin.idx` are separate
+/// symlinks into a content-addressed store, the link's target has no `.idx`
+/// next to it.
 fn manifest_genome(path: &Path) -> Result<String> {
-    let canonical = fs::canonicalize(path)
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("--genome {} is not a file", path.display()))?;
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let recorded = fs::canonicalize(dir)
+        .with_context(|| format!("cannot resolve --genome {}", path.display()))?
+        .join(name);
+    let meta = fs::metadata(&recorded)
         .with_context(|| format!("cannot resolve --genome {}", path.display()))?;
-    ensure!(
-        canonical.is_file(),
-        "--genome {} is not a file",
-        path.display()
-    );
-    canonical
+    ensure!(meta.is_file(), "--genome {} is not a file", path.display());
+    recorded
         .into_os_string()
         .into_string()
         .map_err(|p| anyhow!("--genome {} is not valid UTF-8", p.display()))
