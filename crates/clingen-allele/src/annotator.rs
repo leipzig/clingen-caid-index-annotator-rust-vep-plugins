@@ -15,6 +15,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use vareffect::FastaReader;
 
+use crate::contig::primary_contigs;
 use crate::index::{FORMAT_VERSION, MANIFEST_FILE};
 use crate::{CaIndex, Error, HgvsResult, Manifest, canonical_hgvs, format_caid, resolve_contig};
 
@@ -108,12 +109,18 @@ impl Annotator {
     ///
     /// [`Error::Manifest`] if the index is not format version 1 or not on
     /// GRCh38 (the message names what was found), the errors of
-    /// [`CaIndex::open`] for an unreadable index, and [`Error::Genome`] if the
-    /// genome cannot be opened.
+    /// [`CaIndex::open`] for an unreadable index, [`Error::Genome`] if the
+    /// genome cannot be opened, and [`Error::GenomeNotGrch38`] if it is not
+    /// GRCh38: a primary contig it carries (any of chr1-chr22, chrX, chrY,
+    /// chrM, under whatever naming the file uses) has a length other than
+    /// GRCh38's, or it carries none of them. A genome may lack some primary
+    /// contigs (a chr21-only build, say); variants on those are
+    /// [`Status::Unsupported`].
     pub fn open(index_dir: &Path, genome_bin: &Path) -> Result<Self, Error> {
         let index = CaIndex::open(index_dir)?;
         check_manifest(index.manifest(), &index_dir.join(MANIFEST_FILE))?;
         let genome = FastaReader::open(genome_bin)?;
+        check_genome(&genome, genome_bin)?;
         Ok(Self {
             index,
             genome,
@@ -342,6 +349,38 @@ fn check_manifest(manifest: &Manifest, path: &Path) -> Result<(), Error> {
             path.display(),
             manifest.assembly
         )));
+    }
+    Ok(())
+}
+
+/// Reject a genome that is not GRCh38, judged by its primary contigs' lengths.
+///
+/// A wrong-build genome would otherwise pass the REF check of variants on
+/// the same build and key them at the wrong GRCh38 position.
+fn check_genome(genome: &FastaReader, path: &Path) -> Result<(), Error> {
+    let not_grch38 = |reason: String| Error::GenomeNotGrch38 {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let mut present = 0;
+    for contig in primary_contigs() {
+        let Some(found) = genome.chrom_length(contig.vareffect_name) else {
+            continue;
+        };
+        if found != contig.length {
+            return Err(not_grch38(format!(
+                "contig {name} is {found} bases long; GRCh38 {name} is {expected}",
+                name = contig.vareffect_name,
+                expected = contig.length,
+            )));
+        }
+        present += 1;
+    }
+    if present == 0 {
+        return Err(not_grch38(
+            "it has none of the 25 GRCh38 primary contigs (chr1-chr22, chrX, chrY, chrM)"
+                .to_owned(),
+        ));
     }
     Ok(())
 }

@@ -3,7 +3,9 @@
 //! The Registry's GRCh38 HGVS strings are keyed by `NC_` accession, while
 //! callers hand us VCF-style names (`21`, `chr21`, `MT`). Only the 25 primary
 //! sequences (1-22, X, Y, MT) are supported; patch, alt and unplaced contigs
-//! resolve to `None`.
+//! resolve to `None`. The table also carries each sequence's GRCh38 length,
+//! which is how [`Annotator::open`](crate::Annotator::open) tells a GRCh38
+//! genome from another build.
 
 /// A supported GRCh38 primary contig.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,51 +16,61 @@ pub struct Contig {
     pub accession: &'static str,
     /// True for the mitochondrial genome (`m.` HGVS rather than `g.`).
     pub mito: bool,
+    /// Length of the GRCh38 sequence in bases, e.g. 46,709,983 for chr21.
+    pub length: u64,
 }
 
-const fn nuclear(vareffect_name: &'static str, accession: &'static str) -> Contig {
+const fn nuclear(vareffect_name: &'static str, accession: &'static str, length: u64) -> Contig {
     Contig {
         vareffect_name,
         accession,
         mito: false,
+        length,
     }
 }
 
 /// The 25 GRCh38 primary sequences. Accessions are copied from vareffect's
 /// `chrom` table (its lookup function is not usable here because it passes
 /// unknown input through unchanged); `accessions_match_vareffect` keeps the
-/// two in step.
+/// two in step. Lengths are the GRCh38 ones the harvester declares to the
+/// Registry (`harvest/query_registry.py`).
 static CONTIGS: [Contig; 25] = [
-    nuclear("chr1", "NC_000001.11"),
-    nuclear("chr2", "NC_000002.12"),
-    nuclear("chr3", "NC_000003.12"),
-    nuclear("chr4", "NC_000004.12"),
-    nuclear("chr5", "NC_000005.10"),
-    nuclear("chr6", "NC_000006.12"),
-    nuclear("chr7", "NC_000007.14"),
-    nuclear("chr8", "NC_000008.11"),
-    nuclear("chr9", "NC_000009.12"),
-    nuclear("chr10", "NC_000010.11"),
-    nuclear("chr11", "NC_000011.10"),
-    nuclear("chr12", "NC_000012.12"),
-    nuclear("chr13", "NC_000013.11"),
-    nuclear("chr14", "NC_000014.9"),
-    nuclear("chr15", "NC_000015.10"),
-    nuclear("chr16", "NC_000016.10"),
-    nuclear("chr17", "NC_000017.11"),
-    nuclear("chr18", "NC_000018.10"),
-    nuclear("chr19", "NC_000019.10"),
-    nuclear("chr20", "NC_000020.11"),
-    nuclear("chr21", "NC_000021.9"),
-    nuclear("chr22", "NC_000022.11"),
-    nuclear("chrX", "NC_000023.11"),
-    nuclear("chrY", "NC_000024.10"),
+    nuclear("chr1", "NC_000001.11", 248_956_422),
+    nuclear("chr2", "NC_000002.12", 242_193_529),
+    nuclear("chr3", "NC_000003.12", 198_295_559),
+    nuclear("chr4", "NC_000004.12", 190_214_555),
+    nuclear("chr5", "NC_000005.10", 181_538_259),
+    nuclear("chr6", "NC_000006.12", 170_805_979),
+    nuclear("chr7", "NC_000007.14", 159_345_973),
+    nuclear("chr8", "NC_000008.11", 145_138_636),
+    nuclear("chr9", "NC_000009.12", 138_394_717),
+    nuclear("chr10", "NC_000010.11", 133_797_422),
+    nuclear("chr11", "NC_000011.10", 135_086_622),
+    nuclear("chr12", "NC_000012.12", 133_275_309),
+    nuclear("chr13", "NC_000013.11", 114_364_328),
+    nuclear("chr14", "NC_000014.9", 107_043_718),
+    nuclear("chr15", "NC_000015.10", 101_991_189),
+    nuclear("chr16", "NC_000016.10", 90_338_345),
+    nuclear("chr17", "NC_000017.11", 83_257_441),
+    nuclear("chr18", "NC_000018.10", 80_373_285),
+    nuclear("chr19", "NC_000019.10", 58_617_616),
+    nuclear("chr20", "NC_000020.11", 64_444_167),
+    nuclear("chr21", "NC_000021.9", 46_709_983),
+    nuclear("chr22", "NC_000022.11", 50_818_468),
+    nuclear("chrX", "NC_000023.11", 156_040_895),
+    nuclear("chrY", "NC_000024.10", 57_227_415),
     Contig {
         vareffect_name: "chrM",
         accession: "NC_012920.1",
         mito: true,
+        length: 16_569,
     },
 ];
+
+/// The 25 GRCh38 primary contigs, chr1 to chr22, chrX, chrY, chrM.
+pub(crate) fn primary_contigs() -> &'static [Contig] {
+    &CONTIGS
+}
 
 /// Resolve a contig name to a GRCh38 primary contig.
 ///
@@ -100,6 +112,7 @@ mod tests {
             vareffect_name: "chr21",
             accession: "NC_000021.9",
             mito: false,
+            length: 46_709_983,
         };
         for name in ["21", "chr21", "NC_000021.9"] {
             assert_eq!(contig(name), chr21, "{name}");
@@ -162,5 +175,18 @@ mod tests {
             );
             assert_eq!(c.mito, c.vareffect_name == "chrM", "{}", c.vareffect_name);
         }
+    }
+
+    #[test]
+    fn lengths_are_grch38() {
+        let length = |name: &str| contig(name).length;
+        assert_eq!(length("1"), 248_956_422);
+        assert_eq!(length("21"), 46_709_983);
+        assert_eq!(length("X"), 156_040_895);
+        assert_eq!(length("Y"), 57_227_415);
+        assert_eq!(length("MT"), 16_569);
+        // The GRCh38 primary assembly: 3,088,269,832 nuclear bases plus chrM.
+        let total: u64 = primary_contigs().iter().map(|c| c.length).sum();
+        assert_eq!(total, 3_088_286_401);
     }
 }

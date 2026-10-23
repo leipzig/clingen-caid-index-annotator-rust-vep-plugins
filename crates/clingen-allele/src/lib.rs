@@ -32,6 +32,10 @@ pub enum Error {
     /// The FST index could not be built or read.
     #[error("FST index error: {0}")]
     Fst(#[from] fst::Error),
+    /// The reference genome is not GRCh38: a GRCh38 primary contig it carries
+    /// has another length, or it carries none of them.
+    #[error("genome {} is not GRCh38: {reason}", path.display())]
+    GenomeNotGrch38 { path: PathBuf, reason: String },
     /// One HGVS key was harvested with two different CA IDs.
     #[error("duplicate HGVS key {hgvs} maps to both CA{first} and CA{second}")]
     DuplicateConflict {
@@ -62,5 +66,15 @@ mod tests {
             source: std::io::Error::other("boom"),
         };
         assert_eq!(e.to_string(), "I/O error on index.fst: boom");
+
+        let e = Error::GenomeNotGrch38 {
+            path: PathBuf::from("hg19.bin"),
+            reason: "contig chr21 is 48129895 bases long; GRCh38 chr21 is 46709983".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "genome hg19.bin is not GRCh38: contig chr21 is 48129895 bases long; \
+             GRCh38 chr21 is 46709983"
+        );
     }
 }

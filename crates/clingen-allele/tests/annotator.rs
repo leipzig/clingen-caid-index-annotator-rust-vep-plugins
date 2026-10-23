@@ -6,11 +6,12 @@
 //! * `NC_000021.9:g.33000172dup` is `CA42`
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use clingen_allele::test_support::tiny_genome;
+use clingen_allele::test_support::{CHR21_LEN, tiny_genome};
 use clingen_allele::{Annotator, Error, IndexBuilder, Lookup, Manifest, Stats, Status};
 use tempfile::{TempDir, tempdir};
+use vareffect::fasta::write_genome_binary;
 
 fn manifest(assembly: &str, genome: Option<&str>) -> Manifest {
     Manifest {
@@ -36,7 +37,7 @@ fn build_index(dir: &Path, manifest: Manifest) {
 struct Fixture {
     _genome_dir: TempDir,
     index_dir: TempDir,
-    genome_bin: std::path::PathBuf,
+    genome_bin: PathBuf,
 }
 
 impl Fixture {
@@ -264,6 +265,77 @@ fn manifest_wrong_format_version_rejected() {
     }
 }
 
+/// A genome of `N`s with the given contigs (name, length), under a fresh
+/// temporary directory; returns the directory and the `.bin` path.
+fn genome_with(contigs: &[(&str, usize)], build: &str) -> (TempDir, PathBuf) {
+    let dir = tempdir().unwrap();
+    let seqs: Vec<(&str, Vec<u8>)> = contigs
+        .iter()
+        .map(|&(name, len)| (name, vec![b'N'; len]))
+        .collect();
+    let refs: Vec<(&str, &[u8])> = seqs.iter().map(|(n, s)| (*n, s.as_slice())).collect();
+    let bin = dir.path().join("genome.bin");
+    write_genome_binary(&refs, build, &bin, &dir.path().join("genome.bin.idx")).unwrap();
+    (dir, bin)
+}
+
+/// The message of the error `Annotator::open` gives for this genome.
+fn genome_rejection(fx: &Fixture, genome_bin: &Path) -> String {
+    match Annotator::open(fx.index_dir.path(), genome_bin) {
+        Ok(_) => panic!("{} must be rejected as not GRCh38", genome_bin.display()),
+        Err(e @ Error::GenomeNotGrch38 { .. }) => e.to_string(),
+        Err(other) => panic!("expected Error::GenomeNotGrch38, got {other:?}"),
+    }
+}
+
+#[test]
+fn tiny_genome_is_accepted_as_grch38() {
+    let fx = Fixture::new();
+    let (_dir, genome) = tiny_genome();
+    assert_eq!(genome.chrom_length("chr21"), Some(CHR21_LEN as u64));
+    assert!(fx.open().is_ok());
+}
+
+#[test]
+fn genome_with_grch37_chr21_is_rejected() {
+    let fx = Fixture::new();
+    // 48,129,895 is chr21's GRCh37 (hg19) length.
+    let (_dir, bin) = genome_with(&[("chr21", 48_129_895)], "GRCh38");
+    let message = genome_rejection(&fx, &bin);
+    for part in ["not GRCh38", "chr21", "48129895", "46709983"] {
+        assert!(message.contains(part), "{part:?} not in {message}");
+    }
+    assert!(message.contains(&bin.display().to_string()), "{message}");
+}
+
+#[test]
+fn every_primary_contig_present_is_checked_whatever_the_naming() {
+    let fx = Fixture::new();
+    // chr21 is right; chrM has hg19's 16,571 bases rather than the rCRS's.
+    let (_dir, bin) = genome_with(&[("chr21", CHR21_LEN), ("chrM", 16_571)], "GRCh38");
+    let message = genome_rejection(&fx, &bin);
+    for part in ["chrM", "16571", "16569"] {
+        assert!(message.contains(part), "{part:?} not in {message}");
+    }
+
+    // Ensembl-style names are resolved the way lookups resolve them.
+    let (_dir, bin) = genome_with(&[("21", 48_129_895)], "GRCh37");
+    let message = genome_rejection(&fx, &bin);
+    for part in ["chr21", "48129895", "46709983"] {
+        assert!(message.contains(part), "{part:?} not in {message}");
+    }
+}
+
+#[test]
+fn genome_without_a_primary_contig_is_rejected() {
+    let fx = Fixture::new();
+    let (_dir, bin) = genome_with(&[("chr1_KI270706v1_random", 175_055)], "GRCh38");
+    let message = genome_rejection(&fx, &bin);
+    for part in ["not GRCh38", "none of the 25"] {
+        assert!(message.contains(part), "{part:?} not in {message}");
+    }
+}
+
 #[test]
 fn missing_genome_is_error() {
     let fx = Fixture::new();
@@ -293,8 +365,10 @@ fn base_at_reads_reference() {
     assert_eq!(annotator.base_at("foo", 3243), None);
     // Supported contig that the genome file does not carry.
     assert_eq!(annotator.base_at("1", 1000), None);
-    // Past the end of chr21 (33,000,400 bases) and of chrM (16,569).
-    assert_eq!(annotator.base_at("21", 33_000_401), None);
+    // The last base of chr21, then past the end of it and of chrM (16,569).
+    let chr21_len = CHR21_LEN as u64;
+    assert_eq!(annotator.base_at("21", chr21_len), Some(b'N'));
+    assert_eq!(annotator.base_at("21", chr21_len + 1), None);
     assert_eq!(annotator.base_at("21", u64::MAX), None);
     assert_eq!(annotator.base_at("chrM", 16_570), None);
 }
@@ -446,12 +520,13 @@ fn trimmed_without_anchor_is_unsupported() {
 fn trimmed_anchor_edge_cases_never_panic() {
     let fx = Fixture::new();
     let annotator = fx.annotator();
+    let past_end = CHR21_LEN as u64 + 2;
     for (chrom, start1, ref_allele, alt_allele) in [
         ("21", 0, &b"-"[..], &b"A"[..]), // position 0
         ("21", 0, b"A", b"-"),           // position 0, deletion
         ("21", 1, b"A", b"-"),           // deletion at the first base
         ("21", u64::MAX, b"-", b"A"),    // far past the contig end
-        ("21", 33_000_402, b"-", b"A"),  // anchor just past the end
+        ("21", past_end, b"-", b"A"),    // anchor just past the end
         ("1", 1000, b"-", b"A"),         // contig the genome file lacks
         ("21", 33000167, b"", b""),      // both empty, as zero-length
         ("21", 0, b"", b""),             // both empty at position 0

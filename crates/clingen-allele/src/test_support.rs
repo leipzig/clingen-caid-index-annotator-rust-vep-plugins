@@ -17,8 +17,9 @@ use vareffect::fasta::write_genome_binary;
 /// `>chr21:33000001-33000300`.
 pub const WINDOWS_FA: &str = include_str!("../tests/data/windows.fa");
 
-/// Length of the synthetic `chr21` (long enough to hold every window).
-pub const CHR21_LEN: usize = 33_000_400;
+/// Length of the synthetic `chr21`: GRCh38's, so that
+/// [`Annotator::open`](crate::Annotator::open) accepts the genome as GRCh38.
+pub const CHR21_LEN: usize = 46_709_983;
 
 /// Length of the synthetic `chrM` (the rCRS, `NC_012920.1`).
 pub const CHRM_LEN: usize = 16_569;

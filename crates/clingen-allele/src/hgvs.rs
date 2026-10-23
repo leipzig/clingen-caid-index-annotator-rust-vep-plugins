@@ -111,7 +111,7 @@ pub fn canonical_hgvs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::tiny_genome;
+    use crate::test_support::{CHR21_LEN, tiny_genome};
 
     fn check(chrom: &str, pos1: u64, ref_allele: &str, alt_allele: &str) -> HgvsResult {
         let (_dir, genome) = tiny_genome();
@@ -160,9 +160,11 @@ mod tests {
 
     #[test]
     fn ref_overrunning_the_contig_is_a_mismatch() {
-        // chr21 in the tiny genome is 33,000,400 bases long.
-        assert_eq!(check("21", 33000400, "AC", "A"), HgvsResult::RefMismatch);
-        assert_eq!(check("21", 40_000_000, "A", "C"), HgvsResult::RefMismatch);
+        // A two-base REF at chr21's last base runs one base off the end.
+        let last = CHR21_LEN as u64;
+        assert_eq!(check("21", last, "AC", "A"), HgvsResult::RefMismatch);
+        assert_eq!(check("21", last + 1, "A", "C"), HgvsResult::RefMismatch);
+        assert_eq!(check("21", 50_000_000, "A", "C"), HgvsResult::RefMismatch);
         assert_eq!(check("21", u64::MAX, "A", "C"), HgvsResult::RefMismatch);
     }
 
