@@ -1,0 +1,11 @@
+##fileformat=VCFv4.2
+##reference=GRCh38
+##contig=<ID=chr21,length=46709983>
+##contig=<ID=chrM,length=16569>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr21	5030578	snv	C	T	.	PASS	.
+chr21	13189782	ins_left	C	CA	.	PASS	.
+chr21	13189788	ins_right	A	AA	.	PASS	.
+chr21	33000166	del_novel	TA	T	.	PASS	.
+chrM	3243	melas	A	G	.	PASS	.
+chr21	10000000	bad_ref	A	G	.	PASS	.
