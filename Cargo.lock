@@ -26,6 +26,9 @@ version = "0.1.0"
 dependencies = [
  "clingen-allele",
  "fst",
+ "memmap2",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "vareffect",
