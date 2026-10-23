@@ -8,9 +8,10 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use vareffect::FastaReader;
 
@@ -23,6 +24,11 @@ const SUPPORTED_FORMAT_VERSION: u32 = 1;
 
 /// The only assembly the HGVS keys can be on.
 const SUPPORTED_ASSEMBLY: &str = "GRCh38";
+
+/// Contigs already reported to stderr, for the life of the process (so a
+/// second `Annotator`, or one per thread, does not repeat the line). Only the
+/// genome-error path touches this, so the normal lookup path stays lock-free.
+static FAILED_CONTIGS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 /// How one [`Annotator::lookup`] ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,9 +102,6 @@ pub struct Annotator {
     not_in_index: AtomicU64,
     ref_mismatch: AtomicU64,
     unsupported: AtomicU64,
-    /// Contigs already reported to stderr. Only the genome-error path touches
-    /// this, so the normal lookup path stays lock-free.
-    failed_contigs: Mutex<HashSet<String>>,
 }
 
 impl Annotator {
@@ -122,7 +125,6 @@ impl Annotator {
             not_in_index: AtomicU64::new(0),
             ref_mismatch: AtomicU64::new(0),
             unsupported: AtomicU64::new(0),
-            failed_contigs: Mutex::new(HashSet::new()),
         })
     }
 
@@ -148,7 +150,9 @@ impl Annotator {
     /// bad record cannot abort a run. If the genome cannot be read for a
     /// contig (typically because the genome file does not carry it), the
     /// variant is [`Status::Unsupported`] and one line per such contig goes
-    /// to stderr.
+    /// to stderr, once for the whole process however many `Annotator`s there
+    /// are. The warning is best effort: a stderr that cannot be written to
+    /// (a closed pipe, a full disk) is ignored.
     pub fn lookup(&self, chrom: &str, pos1: u64, ref_allele: &[u8], alt_allele: &[u8]) -> Lookup {
         match canonical_hgvs(chrom, pos1, ref_allele, alt_allele, &self.genome) {
             Ok(HgvsResult::Hgvs(hgvs)) => match self.index.get(&hgvs) {
@@ -178,8 +182,9 @@ impl Annotator {
                 Lookup::without_key(Status::Unsupported)
             }
             Err(error) => {
-                self.report_genome_error(chrom, &error);
+                // Count first, so the tally is right whatever the reporter does.
                 count(&self.unsupported);
+                report_genome_error(chrom, &error);
                 Lookup::without_key(Status::Unsupported)
             }
         }
@@ -212,33 +217,45 @@ impl Annotator {
             unsupported: self.unsupported.load(Ordering::Relaxed),
         }
     }
-
-    /// Print a one-line warning the first time `chrom` fails.
-    fn report_genome_error(&self, chrom: &str, error: &Error) {
-        // Key on the canonical name so `1` and `chr1` share one warning;
-        // `canonical_hgvs` only reads the genome for a resolvable contig, but
-        // fall back to the caller's spelling rather than assume that.
-        let contig = resolve_contig(chrom).map_or(chrom, |c| c.vareffect_name);
-        if self.first_failure(contig) {
-            eprintln!(
-                "clingen-allele: genome lookup failed for contig '{contig}' ({error}); \
-                 variants on this contig are reported Unsupported"
-            );
-        }
-    }
-
-    /// True the first time `contig` is passed in.
-    fn first_failure(&self, contig: &str) -> bool {
-        // A poisoned set is still a usable set; the lookup path must not panic.
-        self.failed_contigs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(contig.to_owned())
-    }
 }
 
 fn count(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Warn on stderr the first time `chrom` fails, ignoring a failed write.
+///
+/// `eprintln!` would panic on a stderr that errors (EPIPE under `| head`,
+/// ENOSPC), and a warning must never take a lookup down.
+fn report_genome_error(chrom: &str, error: &Error) {
+    let _ = warn_once(&mut io::stderr().lock(), chrom, error);
+}
+
+/// Write the one-line warning for `chrom` to `out` if no `Annotator` in this
+/// process has reported that contig yet.
+fn warn_once(out: &mut impl Write, chrom: &str, error: &Error) -> io::Result<()> {
+    // Key on the canonical name so `1` and `chr1` share one warning;
+    // `canonical_hgvs` only reads the genome for a resolvable contig, but
+    // fall back to the caller's spelling rather than assume that.
+    let contig = resolve_contig(chrom).map_or(chrom, |c| c.vareffect_name);
+    if !first_failure(contig) {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "clingen-allele: genome lookup failed for contig '{contig}' ({error}); \
+         variants on this contig are reported Unsupported"
+    )
+}
+
+/// True the first time `contig` is passed in, in this process.
+fn first_failure(contig: &str) -> bool {
+    // A poisoned set is still a usable set; the lookup path must not panic.
+    let mut seen = FAILED_CONTIGS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    !seen.contains(contig) && seen.insert(contig.to_owned())
 }
 
 /// Reject an index this crate cannot interpret.
@@ -263,35 +280,51 @@ fn check_manifest(manifest: &Manifest, path: &Path) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::IndexBuilder;
-    use crate::test_support::tiny_genome;
+
+    fn genome_error() -> Error {
+        Error::Manifest("stand-in for a genome read fault".into())
+    }
+
+    /// Every unit test here uses contig names no other test touches, because
+    /// the dedupe set is shared by the whole test binary.
+    #[test]
+    fn warning_is_written_once_per_contig_per_process() {
+        let mut out = Vec::new();
+        // `Y` and `chrY` are the same contig: one line between them, however
+        // many callers (or Annotators) ask.
+        warn_once(&mut out, "Y", &genome_error()).unwrap();
+        warn_once(&mut out, "chrY", &genome_error()).unwrap();
+        warn_once(&mut out, "Y", &genome_error()).unwrap();
+        // A contig that is not a primary one is keyed by the caller's spelling.
+        warn_once(&mut out, "unit-test-contig", &genome_error()).unwrap();
+        warn_once(&mut out, "unit-test-contig", &genome_error()).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert!(lines[0].contains("contig 'chrY'"), "{text}");
+        assert!(lines[1].contains("contig 'unit-test-contig'"), "{text}");
+        assert!(lines[0].ends_with("variants on this contig are reported Unsupported"));
+    }
+
+    struct BrokenPipe;
+
+    impl Write for BrokenPipe {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
 
     #[test]
-    fn genome_errors_are_reported_once_per_contig() {
-        let (genome_dir, _reader) = tiny_genome();
-        let index_dir = tempfile::tempdir().unwrap();
-        IndexBuilder::new()
-            .finish(
-                index_dir.path(),
-                Manifest {
-                    format_version: 1,
-                    assembly: "GRCh38".into(),
-                    sources: Vec::new(),
-                    harvest_date: "2026-10-23".into(),
-                    entries: 0,
-                    vareffect_version: "0.6.0".into(),
-                    genome: None,
-                },
-            )
-            .unwrap();
-        let annotator =
-            Annotator::open(index_dir.path(), &genome_dir.path().join("genome.bin")).unwrap();
-
-        // `1` and `chr1` are the same contig; neither has been reported yet.
-        annotator.lookup("1", 1000, b"A", b"G");
-        annotator.lookup("chr1", 1000, b"A", b"G");
-        assert!(!annotator.first_failure("chr1"), "chr1 already reported");
-        assert!(annotator.first_failure("chr2"), "chr2 is new");
-        assert!(!annotator.first_failure("chr2"));
+    fn unwritable_stderr_is_an_error_not_a_panic() {
+        let result = warn_once(&mut BrokenPipe, "unit-test-broken-pipe", &genome_error());
+        assert!(result.is_err());
+        // The contig counts as reported even though the write failed, so a
+        // dead stderr is not retried for every variant.
+        assert!(!first_failure("unit-test-broken-pipe"));
     }
 }
