@@ -308,6 +308,77 @@ fn open_corrupt_fst_is_fst_error() {
     }
 }
 
+/// A 1000-key index in `dir`, big enough that cutting bytes off the end lands
+/// inside the FST body rather than in a tiny header.
+fn build_thousand(dir: &Path) {
+    let mut builder = IndexBuilder::new();
+    for i in 0..1000u64 {
+        builder.add(&format!("NC_000021.9:g.{}C>T", 5_000_000 + i), 1_000 + i);
+    }
+    assert_eq!(builder.finish(dir, manifest()).unwrap(), 1000);
+}
+
+#[test]
+fn open_truncated_fst_is_an_error_not_a_later_panic() {
+    let full = tempdir().unwrap();
+    build_thousand(full.path());
+    let bytes = fs::read(full.path().join("caid.fst")).unwrap();
+
+    let len = bytes.len();
+    for kept in [len - 1, len - 5, len - 30, len / 2] {
+        let dir = tempdir().unwrap();
+        fs::copy(
+            full.path().join("manifest.json"),
+            dir.path().join("manifest.json"),
+        )
+        .unwrap();
+        fs::write(dir.path().join("caid.fst"), &bytes[..kept]).unwrap();
+        match CaIndex::open(dir.path()) {
+            Err(Error::Manifest(_) | Error::Fst(_)) => {}
+            Err(other) => panic!("cut to {kept} of {len} bytes: unexpected {other:?}"),
+            Ok(_) => panic!("cut to {kept} of {len} bytes opened successfully"),
+        }
+    }
+}
+
+#[test]
+fn open_truncated_fst_names_both_files_and_counts() {
+    let dir = tempdir().unwrap();
+    build_thousand(dir.path());
+    let fst_path = dir.path().join("caid.fst");
+    let bytes = fs::read(&fst_path).unwrap();
+    fs::write(&fst_path, &bytes[..bytes.len() - 5]).unwrap();
+    match CaIndex::open(dir.path()).unwrap_err() {
+        Error::Manifest(msg) => {
+            assert!(msg.contains("manifest.json"), "{msg}");
+            assert!(msg.contains("caid.fst"), "{msg}");
+            assert!(msg.contains("lists 1000 entries"), "{msg}");
+        }
+        other => panic!("expected Manifest, got {other:?}"),
+    }
+}
+
+#[test]
+fn open_fst_from_another_build_is_a_manifest_error() {
+    let dir = tempdir().unwrap();
+    build(dir.path(), &KEYS[..2]).unwrap();
+    let other = tempdir().unwrap();
+    build(other.path(), &KEYS[..1]).unwrap();
+    // Two keys in the FST, a manifest from a one-key build.
+    fs::copy(
+        other.path().join("manifest.json"),
+        dir.path().join("manifest.json"),
+    )
+    .unwrap();
+    match CaIndex::open(dir.path()).unwrap_err() {
+        Error::Manifest(msg) => {
+            assert!(msg.contains("lists 1 entries"), "{msg}");
+            assert!(msg.contains("contains 2"), "{msg}");
+        }
+        other => panic!("expected Manifest, got {other:?}"),
+    }
+}
+
 #[test]
 fn ca_index_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}

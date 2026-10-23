@@ -158,12 +158,16 @@ impl CaIndex {
     /// Open the index directory written by [`IndexBuilder::finish`].
     ///
     /// The manifest is parsed but not checked against what the caller expects
-    /// (assembly, format version); that is up to the caller.
+    /// (assembly, format version); that is up to the caller. The FST's key
+    /// count is checked against `manifest.entries`, which catches a truncated
+    /// `caid.fst` or one paired with another build's manifest at open time
+    /// rather than as a panic on the first lookup.
     ///
     /// # Errors
     ///
     /// [`Error::Io`] naming the file that could not be read or mapped,
-    /// [`Error::Manifest`] if `manifest.json` is not valid, and [`Error::Fst`]
+    /// [`Error::Manifest`] if `manifest.json` is not valid or lists a
+    /// different number of entries than `caid.fst` holds, and [`Error::Fst`]
     /// if `caid.fst` is not a valid FST.
     pub fn open(dir: &Path) -> Result<Self, Error> {
         let manifest_path = dir.join(MANIFEST_FILE);
@@ -179,6 +183,20 @@ impl CaIndex {
         // undefined behaviour; index directories are meant to be immutable.
         let mmap = unsafe { Mmap::map(&file) }.map_err(io_error(&fst_path))?;
         let map = fst::Map::new(mmap)?;
+
+        // `fst::Map::new` only checks the header, so a truncated file can still
+        // open and then panic in `get`. The key count sits in the last bytes of
+        // the file, so a cut file reads back garbage here; comparing it with
+        // the manifest is an O(1) way to reject it.
+        if map.len() as u64 != manifest.entries {
+            return Err(Error::Manifest(format!(
+                "{}: lists {} entries but {} contains {}",
+                manifest_path.display(),
+                manifest.entries,
+                fst_path.display(),
+                map.len()
+            )));
+        }
 
         Ok(Self { map, manifest })
     }
