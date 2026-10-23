@@ -51,7 +51,7 @@ padded), but it has exactly one canonical HGVS, and so one CA ID.
 | `clingen-index` CLI (`build`, `validate`) | **works**; on the local branch `feature/clingen-allele` |
 | vep-rs plugin `--plugin ClinGen` | **works** offline; on a local vep-rs branch (`clingen-allele-plugin`), not pushed |
 | fastVEP provider (`FV_CLINGEN`) | **works** offline; on a local fastVEP branch (`clingen-allele-plugin`), not pushed |
-| chr21 conformance with the Registry | all 10,958,898 rows match the Registry's HGVS ([details](docs/known-differences.md)) |
+| chr21 conformance with the Registry | all 10,958,898 rows match the Registry's HGVS ([details](docs/known-differences.md)); none of them is a `delins` or on chrM, so those classes are unvalidated ([Known limitations](#known-limitations)) |
 | End-to-end check, first 100,000 chr21 sites | both tools: all 100,000 CA IDs agree with the harvest ([below](#end-to-end-check)) |
 | Demo data | chr21 only, genome and index (see [Known limitations](#known-limitations)) |
 
@@ -103,15 +103,35 @@ run here).
 
 ### 2. The index (once per harvest)
 
+First validate the harvest. `validate` recomputes every harvested allele's
+HGVS from the genome and compares it with the Registry's, class by class:
+
+```bash
+cargo run -p clingen-index --release -- validate --chunks data/chr21_chunks \
+    --genome data/genome_chr21/chr21.bin --mismatches data/chr21_mismatches.tsv
+```
+
+Run it on every new harvest before building. It exits 1 only when a
+substitution mismatches, so read the `total` and `match` columns of every
+class: mismatching indels would miss (`not_in_index`), and a class whose
+`total` is 0 has not been checked at all. A mismatch pattern goes in
+[`docs/known-differences.md`](docs/known-differences.md). The chr21 result is
+in [chr21 index](#chr21-index).
+
+Then build:
+
 ```bash
 cargo run -p clingen-index --release -- build --chunks data/chr21_chunks \
     --out data/index_chr21 --source gnomad41_genomes_chr21 \
     --genome "$PWD/data/genome_chr21/chr21.bin" --harvest-date 2026-10-23
 ```
 
-`--genome` is recorded in `manifest.json`, and both tools use it when they are
-not given a genome; an absolute path keeps the index usable from any
-directory. [chr21 index](#chr21-index) has its size and the `validate` run.
+`build` records `--genome` in `manifest.json` as an absolute path, and both
+tools use it when they are not given a genome. Rebuilding into the same
+`--out` replaces the index by rename: a running tool keeps reading the old
+one, and a failed build leaves it in place. `build` holds every row in memory
+(see [Known limitations](#known-limitations)). [chr21 index](#chr21-index)
+has its size.
 
 ### 3. The tools
 
@@ -423,15 +443,12 @@ genome (UCSC hg38 `chr21.fa.gz` → `chr21.bin`, 46.7 MB), by the commands in
 - **entries:** 10,958,882 from 10,958,898 rows. 16 pairs of gnomAD rows are
   one deletion written at two positions; each pair has one HGVS and one CA ID.
 - **`caid.fst`:** 129,852,406 bytes (about 11.8 bytes per entry), built in
-  3.8 s.
-- **conformance:** `clingen-index validate` over all rows finds no mismatch
-  in any class (4.4 s):
-
-  ```bash
-  cargo run -p clingen-index --release -- validate --chunks data/chr21_chunks \
-      --genome data/genome_chr21/chr21.bin --mismatches data/chr21_mismatches.tsv
-  ```
-
+  3.8 s with a peak of 747,388,928 bytes resident (about 68 bytes per
+  harvested row; macOS `/usr/bin/time -l`). The rebuild at `2d0347c` has the
+  same entry count and size.
+- **conformance:** `clingen-index validate` ([step 2](#2-the-index-once-per-harvest))
+  over all rows finds no mismatch in any class that has rows (4.4 s). There
+  are no `delins` and no `m.` rows.
   A 10,000-row sample is checked by
   `CLINGEN_CHR21_GENOME=$PWD/data/genome_chr21/chr21.bin cargo test -p clingen-allele --test conformance --release`,
   which also rewrites each sample indel padded and left-aligned.
@@ -445,6 +462,54 @@ genome (UCSC hg38 `chr21.fa.gz` → `chr21.bin`, 46.7 MB), by the commands in
   variant anywhere else (the toy's `melas`, on chrM) gets nothing and is
   counted `unsupported`. Whole-genome use needs the full GRCh38 genome and a
   harvest of every chromosome, built into one index.
+- **No Registry evidence yet for `delins` or chrM.** The chr21 harvest has
+  no `delins` rows and no `m.` rows (`validate` counts 0 of each), so for
+  those classes the HGVS `clingen-allele` computes has been compared with the
+  Registry's only for the two hand-checked examples in
+  `crates/clingen-allele/tests/hgvs_examples.rs`
+  (`NC_000021.9:g.33000017_33000018delinsTG` and `NC_012920.1:m.3243A>G`).
+  vareffect does not shift a `delins` 3′, so the Registry may write some of
+  them differently; such a difference would show up as misses
+  (`not_in_index`), not as wrong CA IDs. Validate the first harvest that has
+  these rows before trusting its index. The chr21 gnomAD harvest also holds
+  no MNV or other complex allele, so its index gives an MNV an HGVS but no CA
+  ID.
+- **`clingen-index build` holds every row in memory.** It keeps and sorts all
+  harvested (HGVS, CA ID) pairs in memory, about 68 bytes per row: the chr21
+  build (10,958,898 rows) peaks at about 0.75 GB resident
+  ([chr21 index](#chr21-index)). That is about 6.8 GB per 100 million rows,
+  so a whole-genome build needs an external sort first, which `build` does
+  not have yet.
+- **Run `clingen-index validate` on every new harvest before building.** It
+  is what checks that the HGVS `clingen-allele` computes matches the
+  Registry's for that harvest; without it a mismatch shows up only as
+  unexplained `not_in_index` misses. It exits 1 only for a substitution
+  mismatch, so read every class's `total` and `match` columns
+  ([step 2](#2-the-index-once-per-harvest)).
+- **A genome of another build is refused.** When it opens the genome,
+  `clingen-allele` compares the length of every primary contig the genome
+  carries with GRCh38's, and both tools stop at startup on a difference, or on
+  a genome with none of the primary contigs. A 1,000-base chr21 stops both
+  with `genome … is not GRCh38: contig chr21 is 1000 bases long; GRCh38 chr21
+  is 46709983`.
+- **fastVEP refuses non-GRCh38 sources when ClinGen is loaded.** With an index
+  in `--sa-dir`, a VEP cache, a GFF3 whose `#!genome-build` header names
+  another build, or another `--sa-dir` database built for one stops the run
+  before any annotation is written, naming the source and its build; a source
+  that declares no build is not refused. `--sa-only` ignores `--gff3` and
+  `--cache-dir`, so it does not check them. vep-rs refuses an `--assembly`
+  other than GRCh38.
+- **Nothing checks the input VCF's build.** A GRCh37 VCF run against the
+  GRCh38 genome is not refused. 100,000 GRCh37 chr21 SNVs, written from the
+  harvest's `HGVS_GRCh37` column with each one's own CA ID as its ID, gave
+  `found=2537 not_in_index=22324 ref_mismatch=75139 unsupported=0` in both
+  tools, exit 0, and each of the 2,537 CA IDs was another allele's. A large
+  `ref_mismatch` share is the sign.
+- **vep-rs reports a wrong REF or anchor base on VCF input as
+  `ref_mismatch`.** A VCF allele is looked up with its record's own POS, REF
+  and ALT, so an indel's anchor base is checked against the genome too:
+  `chr21 33000166 GA G`, where the base is `T`, gets no ClinGen fields and
+  counts `ref_mismatch=1`, as in fastVEP's CLI.
 - **LOCAL-ONLY path dependency.** Both adapter branches reach
   `clingen-allele` by the path `../clingen/crates/clingen-allele`, so neither
   builds, with or without the feature, unless this checkout sits next to
@@ -453,16 +518,19 @@ genome (UCSC hg38 `chr21.fa.gz` → `chr21.bin`, 46.7 MB), by the commands in
   but `--format ensembl` lines on strand -1, `--format region` lines other
   than insertions, and `--format hgvs` insertions, duplications and `del` or
   `delins` without their deleted bases get no ClinGen fields, because they do
-  not pin down one plus-strand allele. They are not counted in the tally
-  either.
+  not pin down one plus-strand allele. They are counted `unsupported`.
 - **fastVEP takes one ClinGen index per `--sa-dir`.** A second one stops the
   run. To cover several harvests, build one index from all of them
   (`clingen-index build` takes `--chunks` once per harvest directory).
-- **fastVEP's library and web path trims indels.** `fastvep-web` and the
-  library hand every supplementary provider Ensembl-style trimmed indel
-  alleles rather than the VCF's. That is upstream fastVEP behaviour and
-  affects every provider; the ClinGen provider handles it
-  (`clingen-allele`'s `lookup_trimmed`).
+- **fastVEP's library and web path trims indels, and so does not check an
+  indel's anchor base.** `fastvep-web` and the library hand every
+  supplementary provider Ensembl-style trimmed indel alleles rather than the
+  VCF's. That is upstream fastVEP behaviour and affects every provider; the
+  ClinGen provider handles it with `clingen-allele`'s `lookup_trimmed`, which
+  takes the anchor base from the genome. A wrong anchor base therefore goes
+  unnoticed on that path: `21 5311513 A AAAAAACAAGGAAATATCTTTACAC`, where the
+  base is `T`, gets `CA1019413128` there, while vep-rs and fastVEP's CLI count
+  it `ref_mismatch`.
 
 ## Layout
 

@@ -18,7 +18,8 @@ Registry's HGVS, so the exclusion list below is empty and
 - **Genome:** UCSC hg38 `chr21.fa.gz`, converted by
   `scripts/build_chr21_genome.sh data/genome_chr21` into
   `data/genome_chr21/chr21.bin` (46,709,983 bytes).
-- **Command** (release build, 4.4 s wall clock):
+- **Command** (release build, 4.4 s wall clock; re-run at `2d0347c`, with
+  vareffect pinned to `=0.6.0`, it printed the same output in 4.5 s):
 
   ```bash
   cargo run -p clingen-index --release -- validate --chunks data/chr21_chunks \
@@ -55,6 +56,14 @@ rounds, so it can read 100.0 with mismatches left):
 Classes come from the Registry's HGVS. The chr21 harvest has no `m` rows
 (those are chrM), and no `delins` or `other` rows: every chr21 site is a
 substitution or a plain deletion, duplication or insertion.
+
+So `delins` and `m.` keys have no Registry evidence beyond the two
+hand-checked examples in `crates/clingen-allele/tests/hgvs_examples.rs`
+(`delins_revcomp`, `NC_000021.9:g.33000017_33000018delinsTG`, and
+`mito_m_prefix`, `NC_012920.1:m.3243A>G`). vareffect does not shift a
+`delins` 3′, which the design names as a risk. The first harvest with rows in
+those classes must be validated, and its counts recorded here, before its
+index is trusted.
 
 ## Patterns
 
