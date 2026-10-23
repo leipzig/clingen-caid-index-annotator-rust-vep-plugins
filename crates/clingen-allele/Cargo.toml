@@ -1,0 +1,12 @@
+[package]
+name = "clingen-allele"
+version = "0.1.0"
+description = "ClinGen Allele Registry CA-ID annotation over GRCh38 canonical HGVS"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fst = "0.4"
+thiserror = "2"
+vareffect = "0.6"
