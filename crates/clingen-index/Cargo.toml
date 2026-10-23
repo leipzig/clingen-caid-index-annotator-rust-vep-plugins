@@ -1,0 +1,18 @@
+[package]
+name = "clingen-index"
+version = "0.1.0"
+description = "Build and validate the ClinGen Allele Registry CA-ID index from harvested chunks"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+clingen-allele = { path = "../clingen-allele" }
+vareffect = "0.6"
+
+[dev-dependencies]
+assert_cmd = "2"
+clingen-allele = { path = "../clingen-allele", features = ["test-support"] }
+tempfile = "3"
