@@ -338,6 +338,155 @@ fn genome_path_from_manifest_resolves_against_index_dir() {
     );
 }
 
+/// The `Lookup` every key-less `Unsupported` outcome carries.
+fn unsupported() -> Lookup {
+    Lookup {
+        hgvs: None,
+        caid: None,
+        status: Status::Unsupported,
+    }
+}
+
+#[test]
+fn trimmed_insertion_matches_vcf_form() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    // VEP's `T>TA` at 33000166 is start 33000167, REF `-`, ALT `A`.
+    let trimmed = annotator.lookup_trimmed("21", 33000167, b"-", b"A");
+    let vcf = annotator.lookup("21", 33000166, b"T", b"TA");
+    assert_eq!(trimmed, vcf);
+    assert_eq!(
+        trimmed,
+        Lookup {
+            hgvs: Some("NC_000021.9:g.33000172dup".to_string()),
+            caid: Some("CA42".to_string()),
+            status: Status::Found,
+        }
+    );
+}
+
+#[test]
+fn trimmed_deletion_matches_vcf_form() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    // VEP's `TA>T` at 33000166 is start 33000167, REF `A`, ALT `-`.
+    let trimmed = annotator.lookup_trimmed("21", 33000167, b"A", b"-");
+    assert_eq!(trimmed.hgvs.as_deref(), Some("NC_000021.9:g.33000172del"));
+    assert_eq!(trimmed.caid, None);
+    assert_eq!(trimmed.status, Status::NotInIndex);
+    assert_eq!(trimmed, annotator.lookup("21", 33000166, b"TA", b"T"));
+}
+
+#[test]
+fn trimmed_empty_slice_same_as_dash() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    assert_eq!(
+        annotator.lookup_trimmed("21", 33000167, b"", b"A"),
+        annotator.lookup_trimmed("21", 33000167, b"-", b"A")
+    );
+    assert_eq!(
+        annotator.lookup_trimmed("21", 33000167, b"A", b""),
+        annotator.lookup_trimmed("21", 33000167, b"A", b"-")
+    );
+}
+
+#[test]
+fn trimmed_snv_passthrough() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    let lookup = annotator.lookup_trimmed("21", 5030578, b"C", b"T");
+    assert_eq!(lookup.status, Status::Found);
+    assert_eq!(lookup.caid.as_deref(), Some("CA749862939"));
+    assert_eq!(lookup, annotator.lookup("21", 5030578, b"C", b"T"));
+}
+
+#[test]
+fn trimmed_lowercase() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    let upper = annotator.lookup_trimmed("21", 33000167, b"-", b"A");
+    let lower = annotator.lookup_trimmed("21", 33000167, b"-", b"a");
+    assert_eq!(lower.hgvs, upper.hgvs);
+    assert_eq!(lower, upper);
+    // A lowercase deletion REF is anchored and uppercased the same way.
+    assert_eq!(
+        annotator.lookup_trimmed("21", 33000167, b"a", b"-").hgvs,
+        annotator.lookup_trimmed("21", 33000167, b"A", b"-").hgvs
+    );
+}
+
+#[test]
+fn trimmed_without_anchor_is_unsupported() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    // Start 1 has no base before it to anchor on.
+    assert_eq!(annotator.lookup_trimmed("21", 1, b"-", b"A"), unsupported());
+    // Not a contig at all.
+    assert_eq!(
+        annotator.lookup_trimmed("foo", 33000167, b"-", b"A"),
+        unsupported()
+    );
+    // Nothing to insert or delete.
+    assert_eq!(
+        annotator.lookup_trimmed("21", 33000167, b"-", b"-"),
+        unsupported()
+    );
+    assert_eq!(annotator.stats().unsupported, 3);
+    assert_eq!(
+        annotator.stats(),
+        Stats {
+            unsupported: 3,
+            ..Stats::default()
+        }
+    );
+}
+
+#[test]
+fn trimmed_anchor_edge_cases_never_panic() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    for (chrom, start1, ref_allele, alt_allele) in [
+        ("21", 0, &b"-"[..], &b"A"[..]), // position 0
+        ("21", 0, b"A", b"-"),           // position 0, deletion
+        ("21", 1, b"A", b"-"),           // deletion at the first base
+        ("21", u64::MAX, b"-", b"A"),    // far past the contig end
+        ("21", 33_000_402, b"-", b"A"),  // anchor just past the end
+        ("1", 1000, b"-", b"A"),         // contig the genome file lacks
+        ("21", 33000167, b"", b""),      // both empty, as zero-length
+        ("21", 0, b"", b""),             // both empty at position 0
+    ] {
+        assert_eq!(
+            annotator.lookup_trimmed(chrom, start1, ref_allele, alt_allele),
+            unsupported(),
+            "{chrom}:{start1} {ref_allele:?}>{alt_allele:?}"
+        );
+    }
+    assert_eq!(annotator.stats().unsupported, 8);
+}
+
+#[test]
+fn trimmed_counts_once_per_call() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    annotator.lookup_trimmed("21", 33000167, b"-", b"A"); // found
+    annotator.lookup_trimmed("21", 5030578, b"C", b"T"); // found
+    annotator.lookup_trimmed("21", 33000167, b"A", b"-"); // not in index
+    let stats = annotator.stats();
+    assert_eq!(
+        stats,
+        Stats {
+            found: 2,
+            not_in_index: 1,
+            ..Stats::default()
+        }
+    );
+    assert_eq!(
+        stats.found + stats.not_in_index + stats.ref_mismatch + stats.unsupported,
+        3
+    );
+}
+
 #[test]
 fn send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}

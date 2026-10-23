@@ -190,6 +190,66 @@ impl Annotator {
         }
     }
 
+    /// Look up the CA ID of a VEP-style minimal allele.
+    ///
+    /// Ensembl/VEP (and the tools built on its conventions) trim the anchor
+    /// base off an indel instead of keeping the VCF form. This takes those
+    /// alleles as given:
+    ///
+    /// * `start1` is 1-based. For an insertion it is the position of the base
+    ///   *after* the insertion point, so VCF `21:33000166 T>TA` arrives as
+    ///   `start1 = 33000167`, REF `-`, ALT `A`. For a deletion it is the first
+    ///   deleted base, so `21:33000166 TA>T` arrives as `start1 = 33000167`,
+    ///   REF `A`, ALT `-`.
+    /// * An allele is empty when it is `-` or zero-length.
+    ///
+    /// With one side empty, the allele is re-anchored on the reference base at
+    /// `start1 - 1` and handed to [`lookup`](Self::lookup) in VCF form, which
+    /// yields the same canonical HGVS as the original VCF record. With neither
+    /// side empty (an SNV, MNV or replacement) the call is exactly
+    /// [`lookup`](Self::lookup).
+    ///
+    /// The result is [`Status::Unsupported`] when both sides are empty, or
+    /// when there is no base to anchor on (`start1` is 0 or 1, the anchor is
+    /// past the end of the contig, or the contig is not one the genome file
+    /// carries). Like [`lookup`](Self::lookup), each call ends in exactly one
+    /// [`Stats`] bucket and never panics.
+    pub fn lookup_trimmed(
+        &self,
+        chrom: &str,
+        start1: u64,
+        ref_allele: &[u8],
+        alt_allele: &[u8],
+    ) -> Lookup {
+        let ref_empty = is_empty_allele(ref_allele);
+        let alt_empty = is_empty_allele(alt_allele);
+        if !ref_empty && !alt_empty {
+            return self.lookup(chrom, start1, ref_allele, alt_allele);
+        }
+        if ref_empty && alt_empty {
+            return self.unanchored();
+        }
+        // The anchor is the base before `start1`. Position 0 is not a base, so
+        // `start1` of 0 or 1 leaves nothing to anchor on.
+        let Some(anchor_pos1) = start1.checked_sub(1).filter(|&pos1| pos1 > 0) else {
+            return self.unanchored();
+        };
+        let Some(anchor) = self.base_at(chrom, anchor_pos1) else {
+            return self.unanchored();
+        };
+        if ref_empty {
+            self.lookup(chrom, anchor_pos1, &[anchor], &anchored(anchor, alt_allele))
+        } else {
+            self.lookup(chrom, anchor_pos1, &anchored(anchor, ref_allele), &[anchor])
+        }
+    }
+
+    /// A key-less [`Status::Unsupported`] outcome, counted as one.
+    fn unanchored(&self) -> Lookup {
+        count(&self.unsupported);
+        Lookup::without_key(Status::Unsupported)
+    }
+
     /// The uppercase reference base at 1-based `pos1` on `chrom`.
     ///
     /// `None` for position 0, a contig name that is not a GRCh38 primary
@@ -221,6 +281,19 @@ impl Annotator {
 
 fn count(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
+}
+
+/// True for the VEP spelling of "no bases" (`-`) and for a zero-length slice.
+fn is_empty_allele(allele: &[u8]) -> bool {
+    allele.is_empty() || allele == b"-"
+}
+
+/// `anchor` followed by `allele`: the VCF spelling of a trimmed allele.
+fn anchored(anchor: u8, allele: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(allele.len() + 1);
+    out.push(anchor);
+    out.extend_from_slice(allele);
+    out
 }
 
 /// Warn on stderr the first time `chrom` fails, ignoring a failed write.
