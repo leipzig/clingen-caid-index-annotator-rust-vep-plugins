@@ -61,7 +61,9 @@ struct ChunkArgs {
 struct BuildArgs {
     #[command(flatten)]
     chunks: ChunkArgs,
-    /// Directory to write `caid.fst` and `manifest.json` into.
+    /// Directory to write `caid.fst` and `manifest.json` into. An index
+    /// already there is replaced by rename, so running readers keep the old
+    /// one and a failed build leaves it intact.
     #[arg(long, value_name = "DIR")]
     out: PathBuf,
     /// Label for the manifest's `sources`; repeatable.

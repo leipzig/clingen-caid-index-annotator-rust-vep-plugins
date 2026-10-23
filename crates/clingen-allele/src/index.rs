@@ -5,11 +5,16 @@
 //!
 //! * `caid.fst` maps each GRCh38 `NC_` HGVS string to its CA ID (the number
 //!   after the `CA` prefix) and is memory-mapped on open.
-//! * `manifest.json` records provenance (see [`Manifest`]). It is written
-//!   last, so its presence implies a complete `caid.fst`.
+//! * `manifest.json` records provenance (see [`Manifest`]).
+//!
+//! [`IndexBuilder::finish`] writes each file under a temporary name and
+//! renames it into place, `caid.fst` first, so `manifest.json` is only ever
+//! present next to a complete `caid.fst`. A rebuild therefore never rewrites a
+//! file a running reader has mapped, and one that fails part-way leaves the
+//! previous index as it was.
 
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, ErrorKind, Write};
 use std::path::Path;
 
 use fst::MapBuilder;
@@ -18,11 +23,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 
-const FST_FILE: &str = "caid.fst";
-const MANIFEST_FILE: &str = "manifest.json";
+pub(crate) const FST_FILE: &str = "caid.fst";
+pub(crate) const MANIFEST_FILE: &str = "manifest.json";
 
-/// The index layout version [`IndexBuilder::finish`] writes.
-const FORMAT_VERSION: u32 = 1;
+/// Where [`IndexBuilder::finish`] writes each file before renaming it into
+/// place. A crashed build can leave these behind; the next build replaces them.
+const FST_TMP_FILE: &str = "caid.fst.tmp";
+const MANIFEST_TMP_FILE: &str = "manifest.json.tmp";
+
+/// The index layout version [`IndexBuilder::finish`] writes, and the only one
+/// [`Annotator::open`](crate::Annotator::open) accepts.
+pub(crate) const FORMAT_VERSION: u32 = 1;
 
 /// Build provenance stored next to the index as `manifest.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,12 +86,28 @@ impl IndexBuilder {
     /// the real count and the version written, so callers may pass any
     /// placeholder for them.
     ///
+    /// `dir` may already hold an index; it is replaced safely:
+    ///
+    /// * Both files are written and synced as `caid.fst.tmp` and
+    ///   `manifest.json.tmp` (replacing any a crashed build left), then
+    ///   renamed over `caid.fst` and then `manifest.json`, with the directory
+    ///   synced after each rename.
+    /// * A [`CaIndex`] that is already open keeps reading the old file, which
+    ///   a rename does not touch; a fresh [`CaIndex::open`] sees the new one.
+    /// * A reader that opens between the two renames finds the new
+    ///   `caid.fst` with the old manifest. [`CaIndex::open`] rejects that pair
+    ///   when their entry counts differ; when they agree, the reader gets the
+    ///   complete new FST with the old provenance.
+    /// * If writing fails before the renames, the previous index is left as it
+    ///   was and the temporary files are removed (where they can be).
+    ///
     /// # Errors
     ///
     /// [`Error::DuplicateConflict`] if a key was added with two different IDs
     /// (the IDs are reported in ascending order); nothing is written in that
     /// case. Otherwise [`Error::Io`], [`Error::Fst`] or [`Error::Manifest`]
-    /// if writing fails.
+    /// if writing fails. An error syncing `dir` after the last rename means
+    /// the new index is in place but may not survive a power loss.
     pub fn finish(self, dir: &Path, mut manifest: Manifest) -> Result<u64, Error> {
         let entries = dedup_sorted(self.entries)?;
         let count = entries.len() as u64;
@@ -88,20 +115,30 @@ impl IndexBuilder {
         manifest.format_version = FORMAT_VERSION;
 
         fs::create_dir_all(dir).map_err(io_error(dir))?;
-
-        // A manifest left by an earlier build must not outlive a failed rebuild
-        // of the FST it describes.
-        let manifest_path = dir.join(MANIFEST_FILE);
-        match fs::remove_file(&manifest_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_error(&manifest_path)(e)),
+        let written = write_and_swap(dir, &entries, &manifest);
+        if written.is_err() {
+            // Best effort: whatever was not renamed into place goes. A file
+            // already renamed, or a directory squatting on the name, makes
+            // this fail harmlessly.
+            let _ = fs::remove_file(dir.join(FST_TMP_FILE));
+            let _ = fs::remove_file(dir.join(MANIFEST_TMP_FILE));
         }
-
-        write_fst(&dir.join(FST_FILE), &entries)?;
-        write_manifest(&manifest_path, &manifest)?;
-        Ok(count)
+        written.map(|()| count)
     }
+}
+
+/// Write both files under their temporary names, then rename them into place
+/// in `dir`: `caid.fst` first, so a manifest is never newer than the FST next
+/// to it.
+fn write_and_swap(dir: &Path, entries: &[(String, u64)], manifest: &Manifest) -> Result<(), Error> {
+    let fst_tmp = dir.join(FST_TMP_FILE);
+    let manifest_tmp = dir.join(MANIFEST_TMP_FILE);
+    write_fst(&fst_tmp, entries)?;
+    write_manifest(&manifest_tmp, manifest)?;
+    replace(&fst_tmp, &dir.join(FST_FILE))?;
+    sync_dir(dir)?;
+    replace(&manifest_tmp, &dir.join(MANIFEST_FILE))?;
+    sync_dir(dir)
 }
 
 /// Sort by key, drop exact repeats, and fail on a key with two IDs.
@@ -120,9 +157,25 @@ fn dedup_sorted(mut entries: Vec<(String, u64)>) -> Result<Vec<(String, u64)>, E
     Ok(entries)
 }
 
+/// A new, empty file at the temporary path `path`, replacing whatever an
+/// earlier build left there. Unlinking first (rather than truncating) means a
+/// stale symlink is replaced, not followed.
+fn create_tmp(path: &Path) -> Result<File, Error> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(io_error(path)(e)),
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(io_error(path))
+}
+
 /// Stream strictly ascending keys into an FST at `path` and sync it to disk.
 fn write_fst(path: &Path, entries: &[(String, u64)]) -> Result<(), Error> {
-    let file = File::create(path).map_err(io_error(path))?;
+    let file = create_tmp(path)?;
     let mut builder = MapBuilder::new(BufWriter::new(file))?;
     for (hgvs, caid) in entries {
         builder.insert(hgvs, *caid)?;
@@ -135,10 +188,29 @@ fn write_fst(path: &Path, entries: &[(String, u64)]) -> Result<(), Error> {
 fn write_manifest(path: &Path, manifest: &Manifest) -> Result<(), Error> {
     let json = serde_json::to_string_pretty(manifest)
         .map_err(|e| Error::Manifest(format!("cannot serialise {}: {e}", path.display())))?;
-    let mut file = File::create(path).map_err(io_error(path))?;
+    let mut file = create_tmp(path)?;
     file.write_all(json.as_bytes()).map_err(io_error(path))?;
     file.write_all(b"\n").map_err(io_error(path))?;
     file.sync_all().map_err(io_error(path))
+}
+
+/// Atomically rename `tmp` over `dest`; the error names `dest`.
+fn replace(tmp: &Path, dest: &Path) -> Result<(), Error> {
+    fs::rename(tmp, dest).map_err(io_error(dest))
+}
+
+/// Sync `dir` so the renames in it survive a crash.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> Result<(), Error> {
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(io_error(dir))
+}
+
+/// Directories cannot be opened as files here; the renames are left to the OS.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> Result<(), Error> {
+    Ok(())
 }
 
 /// `map_err` adapter attaching the offending path to an I/O error.
@@ -179,10 +251,10 @@ impl CaIndex {
 
         let fst_path = dir.join(FST_FILE);
         let file = File::open(&fst_path).map_err(io_error(&fst_path))?;
-        // SAFETY: `caid.fst` is only written by `IndexBuilder::finish`, before
-        // the manifest. As with any memory map, truncating the file while it is
-        // mapped (rebuilding an index in place under a running reader) is
-        // undefined behaviour; index directories are meant to be immutable.
+        // SAFETY: `IndexBuilder::finish` never writes to an existing
+        // `caid.fst`: it renames a new file over it, which leaves this mapped
+        // inode unchanged. Truncating or rewriting the file in place by other
+        // means while it is mapped would be undefined behaviour.
         let mmap = unsafe { Mmap::map(&file) }.map_err(io_error(&fst_path))?;
         let map = fst::Map::new(mmap)?;
 

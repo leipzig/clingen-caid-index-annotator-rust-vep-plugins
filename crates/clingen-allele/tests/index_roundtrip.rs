@@ -235,22 +235,141 @@ fn rebuild_replaces_previous_index() {
     assert_eq!(index.manifest().entries, 1);
 }
 
+/// The file names in `dir`, sorted.
+fn file_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `n` keys `NC_000021.9:g.{5000000 + i}C>T`, each with ID `id_base + i`.
+fn numbered_keys(n: u64, id_base: u64) -> Vec<(String, u64)> {
+    (0..n)
+        .map(|i| (format!("NC_000021.9:g.{}C>T", 5_000_000 + i), id_base + i))
+        .collect()
+}
+
+fn build_owned(dir: &Path, keys: &[(String, u64)]) -> Result<u64, Error> {
+    let mut builder = IndexBuilder::new();
+    for (hgvs, caid) in keys {
+        builder.add(hgvs, *caid);
+    }
+    builder.finish(dir, manifest())
+}
+
+/// Assert that `index` maps each of `keys` to its ID.
+fn assert_answers(index: &CaIndex, keys: &[(String, u64)]) {
+    for (hgvs, caid) in keys {
+        assert_eq!(index.get(hgvs), Some(*caid), "{hgvs}");
+    }
+}
+
 #[test]
-fn failed_rebuild_leaves_no_manifest_behind() {
+fn open_index_keeps_its_answers_across_rebuilds_of_its_dir() {
+    let dir = tempdir().unwrap();
+    let old = numbered_keys(1000, 1_000);
+    build_owned(dir.path(), &old).unwrap();
+    let live = CaIndex::open(dir.path()).unwrap();
+
+    // A bigger index with other IDs, then a much smaller one: rewriting the
+    // mapped file in place returns wrong IDs, None or panics for the first,
+    // and reads past the end of the file (SIGBUS on Linux) for the second.
+    let bigger = numbered_keys(2000, 50_000);
+    build_owned(dir.path(), &bigger).unwrap();
+    assert_answers(&live, &old);
+    assert_eq!(live.manifest().entries, 1000);
+
+    let smaller = numbered_keys(10, 90_000);
+    build_owned(dir.path(), &smaller).unwrap();
+    assert_answers(&live, &old);
+
+    // A fresh open serves the latest build, and no temporary file is left.
+    let fresh = CaIndex::open(dir.path()).unwrap();
+    assert_answers(&fresh, &smaller);
+    assert_eq!(fresh.get(&old[500].0), None);
+    assert_eq!(fresh.manifest().entries, 10);
+    assert_eq!(file_names(dir.path()), ["caid.fst", "manifest.json"]);
+}
+
+#[test]
+fn conflicting_rebuild_leaves_the_previous_index_usable() {
     let dir = tempdir().unwrap();
     build(dir.path(), &KEYS).unwrap();
+    let key = "NC_000021.9:g.5030578C>T";
+    assert!(matches!(
+        build(dir.path(), &[(key, 1), (key, 2)]),
+        Err(Error::DuplicateConflict { .. })
+    ));
 
-    // Make writing caid.fst fail: a directory is squatting on its name.
-    fs::remove_file(dir.path().join("caid.fst")).unwrap();
-    fs::create_dir(dir.path().join("caid.fst")).unwrap();
-    match build(dir.path(), &KEYS).unwrap_err() {
-        Error::Io { path, .. } => assert_eq!(path, dir.path().join("caid.fst")),
-        other => panic!("expected Io, got {other:?}"),
+    let index = CaIndex::open(dir.path()).unwrap();
+    for (hgvs, caid) in KEYS {
+        assert_eq!(index.get(hgvs), Some(caid), "{hgvs}");
     }
-    assert!(
-        !dir.path().join("manifest.json").exists(),
-        "a stale manifest must not describe a half-written index"
-    );
+    assert_eq!(file_names(dir.path()), ["caid.fst", "manifest.json"]);
+}
+
+#[test]
+fn rebuild_failing_to_write_either_file_leaves_the_previous_index_usable() {
+    for squatted in ["caid.fst.tmp", "manifest.json.tmp"] {
+        let dir = tempdir().unwrap();
+        build(dir.path(), &KEYS).unwrap();
+
+        // A directory squatting on the temporary name makes that write fail.
+        fs::create_dir(dir.path().join(squatted)).unwrap();
+        match build(dir.path(), &[("NC_000021.9:g.1A>T", 7)]).unwrap_err() {
+            Error::Io { path, .. } => assert_eq!(path, dir.path().join(squatted)),
+            other => panic!("{squatted}: expected Io, got {other:?}"),
+        }
+
+        let index = CaIndex::open(dir.path()).unwrap();
+        for (hgvs, caid) in KEYS {
+            assert_eq!(index.get(hgvs), Some(caid), "{squatted}: {hgvs}");
+        }
+        assert_eq!(index.get("NC_000021.9:g.1A>T"), None, "{squatted}");
+        assert_eq!(index.manifest().entries, 4, "{squatted}");
+        // The failed build removed what it had written; only the squatter
+        // is left next to the old index.
+        let mut expected = vec!["caid.fst", "manifest.json", squatted];
+        expected.sort_unstable();
+        assert_eq!(file_names(dir.path()), expected, "{squatted}");
+    }
+}
+
+#[test]
+fn stale_temporary_files_from_a_crashed_build_are_overwritten() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("caid.fst.tmp"), b"half an fst").unwrap();
+    fs::write(dir.path().join("manifest.json.tmp"), b"{ \"format_ver").unwrap();
+
+    assert_eq!(build(dir.path(), &KEYS).unwrap(), 4);
+    let index = CaIndex::open(dir.path()).unwrap();
+    for (hgvs, caid) in KEYS {
+        assert_eq!(index.get(hgvs), Some(caid), "{hgvs}");
+    }
+    assert_eq!(file_names(dir.path()), ["caid.fst", "manifest.json"]);
+}
+
+#[test]
+fn reader_opening_between_the_two_renames_gets_an_error() {
+    // `finish` renames the new caid.fst into place before the new manifest,
+    // so a reader opening in between pairs the new FST with the old
+    // manifest. The entry-count check turns that into an error.
+    let dir = tempdir().unwrap();
+    build(dir.path(), &KEYS).unwrap();
+    let next = tempdir().unwrap();
+    build(next.path(), &KEYS[..1]).unwrap();
+    fs::rename(next.path().join("caid.fst"), dir.path().join("caid.fst")).unwrap();
+
+    match CaIndex::open(dir.path()).unwrap_err() {
+        Error::Manifest(msg) => {
+            assert!(msg.contains("lists 4 entries"), "{msg}");
+            assert!(msg.contains("contains 1"), "{msg}");
+        }
+        other => panic!("expected Manifest, got {other:?}"),
+    }
 }
 
 #[test]

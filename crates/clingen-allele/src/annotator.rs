@@ -15,12 +15,8 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use vareffect::FastaReader;
 
+use crate::index::{FORMAT_VERSION, MANIFEST_FILE};
 use crate::{CaIndex, Error, HgvsResult, Manifest, canonical_hgvs, format_caid, resolve_contig};
-
-const MANIFEST_FILE: &str = "manifest.json";
-
-/// The index layout version this crate reads.
-const SUPPORTED_FORMAT_VERSION: u32 = 1;
 
 /// The only assembly the HGVS keys can be on.
 const SUPPORTED_ASSEMBLY: &str = "GRCh38";
@@ -333,9 +329,9 @@ fn first_failure(contig: &str) -> bool {
 
 /// Reject an index this crate cannot interpret.
 fn check_manifest(manifest: &Manifest, path: &Path) -> Result<(), Error> {
-    if manifest.format_version != SUPPORTED_FORMAT_VERSION {
+    if manifest.format_version != FORMAT_VERSION {
         return Err(Error::Manifest(format!(
-            "{}: format_version is {}, but only {SUPPORTED_FORMAT_VERSION} is supported",
+            "{}: format_version is {}, but only {FORMAT_VERSION} is supported",
             path.display(),
             manifest.format_version
         )));
