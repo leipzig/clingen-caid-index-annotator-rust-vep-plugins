@@ -46,11 +46,12 @@ padded), but it has exactly one canonical HGVS, and so one CA ID.
 | Piece | State |
 |---|---|
 | Harvester (`harvest/`): Registry lookup for a sites list | **works**; the recipe below runs it |
-| gnomAD v4.1 chr21 harvest | in progress |
-| `clingen-allele` crate (vareffect HGVS + local index) | planned |
-| `clingen-index` CLI (`build`, `validate`) | planned |
-| vep-rs plugin `--plugin ClinGen` | planned |
-| fastVEP provider (`FV_CLINGEN`) | planned |
+| gnomAD v4.1 chr21 harvest | **done** (2026-10-23): 10,958,898 sites, all registered |
+| `clingen-allele` crate (vareffect HGVS + local index) | implemented on the local branch `feature/clingen-allele` |
+| `clingen-index` CLI (`build`, `validate`) | implemented on the local branch `feature/clingen-allele` |
+| vep-rs plugin `--plugin ClinGen` | implemented on a local vep-rs branch (`clingen-allele-plugin`), not pushed |
+| fastVEP provider (`FV_CLINGEN`) | implemented on a local fastVEP branch (`clingen-allele-plugin`), not pushed |
+| chr21 conformance with the Registry | all 10,958,898 rows match the Registry's HGVS ([details](docs/known-differences.md)) |
 
 Design: [`docs/superpowers/specs/2026-10-23-clingen-allele-plugin-design.md`](docs/superpowers/specs/2026-10-23-clingen-allele-plugin-design.md).
 Implementation plan: [`docs/superpowers/plans/2026-10-23-clingen-allele-plugin.md`](docs/superpowers/plans/2026-10-23-clingen-allele-plugin.md).
@@ -118,7 +119,9 @@ Full output, including the GRCh37 HGVS column, is in
 
 ## Planned: annotating a VCF offline
 
-These commands are from the implementation plan and **do not work yet**:
+The `clingen-index build` step works (see [chr21 index](#chr21-index)). The
+other commands are from the implementation plan: the adapters exist on local
+branches, but they are not yet documented here or cross-checked end to end.
 
 ```bash
 # one-time: vareffect's GRCh38 genome binary (~3.1 GB) and the CA index
@@ -156,11 +159,35 @@ python3 -I harvest/query_registry.py data/gnomad41_chr21_sites.tsv data/chr21_ch
 The Registry is a free public service. Please contact ClinGen before
 harvesting beyond gnomAD-scale site lists.
 
+## chr21 index
+
+Built on 2026-10-23 from the gnomAD v4.1 chr21 harvest, with the chr21-only
+genome (UCSC hg38 `chr21.fa.gz` → `chr21.bin`, 46.7 MB):
+
+```bash
+scripts/build_chr21_genome.sh data/genome_chr21
+cargo run -p clingen-index --release -- build --chunks data/chr21_chunks \
+    --out data/index_chr21 --source gnomad41_genomes_chr21 \
+    --genome "$PWD/data/genome_chr21/chr21.bin" --harvest-date 2026-10-23
+```
+
+- **entries:** 10,958,882 from 10,958,898 rows. 16 pairs of gnomAD rows are
+  one deletion written at two positions; each pair has one HGVS and one CA ID.
+- **`caid.fst`:** 129,852,406 bytes (about 11.8 bytes per entry), built in
+  3.8 s.
+- **conformance:** `clingen-index validate` over all rows finds no mismatch
+  in any class (4.4 s). A 10,000-row sample is checked by
+  `CLINGEN_CHR21_GENOME=$PWD/data/genome_chr21/chr21.bin cargo test -p clingen-allele --test conformance --release`,
+  which also rewrites each sample indel padded and left-aligned. See
+  [`docs/known-differences.md`](docs/known-differences.md).
+
 ## Layout
 
 ```
+crates/      clingen-allele (library) and clingen-index (CLI)
 harvest/     Registry harvester (Python, standard library only)
+scripts/     chr21 genome build and conformance-sample scripts
 examples/    toy VCF and lookup recipe
-docs/        design spec and implementation plan
-data/ logs/  harvest output (gitignored)
+docs/        design spec, implementation plan, known differences
+data/ logs/  harvest output, genome and index (gitignored)
 ```
