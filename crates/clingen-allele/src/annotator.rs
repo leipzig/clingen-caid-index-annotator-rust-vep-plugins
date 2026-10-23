@@ -73,7 +73,8 @@ pub struct Stats {
     pub not_in_index: u64,
     /// Lookups that ended [`Status::RefMismatch`].
     pub ref_mismatch: u64,
-    /// Lookups that ended [`Status::Unsupported`].
+    /// Lookups that ended [`Status::Unsupported`], plus alleles counted by
+    /// [`Annotator::record_unsupported`].
     pub unsupported: u64,
 }
 
@@ -265,6 +266,20 @@ impl Annotator {
             .fetch_base(contig.vareffect_name, pos0)
             .ok()
             .map(|base| base.to_ascii_uppercase())
+    }
+
+    /// Count one allele as [`Status::Unsupported`] without looking it up.
+    ///
+    /// For adapters that skip an allele before calling
+    /// [`lookup`](Self::lookup) or [`lookup_trimmed`](Self::lookup_trimmed),
+    /// for example a symbolic or structural ALT, or an input line that does
+    /// not pin down one plus-strand allele. Calling this for every such skip
+    /// keeps [`stats`](Self::stats) a tally of every allele the run saw, the
+    /// same as an adapter that hands those alleles to `lookup` and gets
+    /// `Unsupported` back. Like `lookup`, it takes `&self` and is safe to call
+    /// from any thread.
+    pub fn record_unsupported(&self) {
+        count(&self.unsupported);
     }
 
     /// How many lookups have ended in each [`Status`] so far.

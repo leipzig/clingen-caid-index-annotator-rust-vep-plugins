@@ -215,6 +215,33 @@ fn stats_tally_every_status() {
 }
 
 #[test]
+fn record_unsupported_counts_an_allele_skipped_without_a_lookup() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    annotator.record_unsupported();
+    annotator.record_unsupported();
+    assert_eq!(
+        annotator.stats(),
+        Stats {
+            unsupported: 2,
+            ..Stats::default()
+        }
+    );
+
+    // The same bucket lookups count Unsupported in, and nothing else moves.
+    annotator.lookup("21", 5030578, b"C", b"<DEL>");
+    annotator.lookup("21", 5030578, b"C", b"T");
+    assert_eq!(
+        annotator.stats(),
+        Stats {
+            found: 1,
+            unsupported: 3,
+            ..Stats::default()
+        }
+    );
+}
+
+#[test]
 fn stats_display_when_empty() {
     assert_eq!(
         Stats::default().to_string(),
