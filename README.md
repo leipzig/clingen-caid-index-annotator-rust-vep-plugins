@@ -28,8 +28,8 @@ padded), but it has exactly one canonical HGVS, and so one CA ID.
   `NC_000021.8:g.…` for the same CA ID). Join datasets from different
   assemblies, callers and normalizers on one key.
 - **Deduplicate variant calls.** Two VCF records that describe the same allele
-  differently get the same CA ID. See `ins_left` and `ins_right` in the recipe
-  below.
+  differently get the same CA ID. See `ins_left` and `ins_right` in the toy
+  run below.
 - **Reach ClinGen curation.** Expert-panel classifications in the
   [ClinGen Evidence Repository](https://erepo.clinicalgenome.org) and evidence in
   the ClinGen Linked Data Hub are indexed by CA ID. Look up
@@ -45,23 +45,107 @@ padded), but it has exactly one canonical HGVS, and so one CA ID.
 
 | Piece | State |
 |---|---|
-| Harvester (`harvest/`): Registry lookup for a sites list | **works**; the recipe below runs it |
+| Harvester (`harvest/`): Registry lookup for a sites list | **works**; the [lookup recipe](#harvest-step-look-up-a-toy-vcf-in-the-live-registry) runs it |
 | gnomAD v4.1 chr21 harvest | **done** (2026-10-23): 10,958,898 sites, all registered |
-| `clingen-allele` crate (vareffect HGVS + local index) | implemented on the local branch `feature/clingen-allele` |
-| `clingen-index` CLI (`build`, `validate`) | implemented on the local branch `feature/clingen-allele` |
-| vep-rs plugin `--plugin ClinGen` | implemented on a local vep-rs branch (`clingen-allele-plugin`), not pushed |
-| fastVEP provider (`FV_CLINGEN`) | implemented on a local fastVEP branch (`clingen-allele-plugin`), not pushed |
+| `clingen-allele` crate (vareffect HGVS + local index) | **works**; on the local branch `feature/clingen-allele` |
+| `clingen-index` CLI (`build`, `validate`) | **works**; on the local branch `feature/clingen-allele` |
+| vep-rs plugin `--plugin ClinGen` | **works** offline; on a local vep-rs branch (`clingen-allele-plugin`), not pushed |
+| fastVEP provider (`FV_CLINGEN`) | **works** offline; on a local fastVEP branch (`clingen-allele-plugin`), not pushed |
 | chr21 conformance with the Registry | all 10,958,898 rows match the Registry's HGVS ([details](docs/known-differences.md)) |
+| End-to-end check, first 100,000 chr21 sites | both tools: all 100,000 CA IDs agree with the harvest ([below](#end-to-end-check)) |
+| Demo data | chr21 only, genome and index (see [Known limitations](#known-limitations)) |
 
 Design: [`docs/superpowers/specs/2026-10-23-clingen-allele-plugin-design.md`](docs/superpowers/specs/2026-10-23-clingen-allele-plugin-design.md).
 Implementation plan: [`docs/superpowers/plans/2026-10-23-clingen-allele-plugin.md`](docs/superpowers/plans/2026-10-23-clingen-allele-plugin.md).
 
-## Recipe: look up a toy VCF
+## Annotating a VCF offline
 
-This recipe uses the harvester's lookup against the live Registry, so it needs
-network access. That is the same call the harvester makes to build the
-offline index. Requirements: `bash`, `curl`, `awk` and Python ≥ 3.9 (standard
-library only).
+Four steps: a genome, an index, a tool built with ClinGen support, and the
+run. Setting up uses the network (the harvest, the genome download, cargo's
+crate downloads); annotating does not.
+
+**Requirements.**
+
+- Rust 1.94.1 or newer, which `clingen-allele` and vareffect need. This repo's
+  `rust-toolchain.toml` pins 1.94.1.
+- The three checkouts side by side in one directory, this one named `clingen`:
+
+  ```
+  clingen/   this repo, branch feature/clingen-allele
+  vep-rs/    branch clingen-allele-plugin
+  fastVEP/   branch clingen-allele-plugin
+  ```
+
+  **LOCAL-ONLY:** both adapters depend on `clingen-allele` by the path
+  `../clingen/crates/clingen-allele`, because the crate is not published yet.
+  Cargo reads a path dependency's manifest even when the feature is off, so
+  those branches do not build at all without this checkout next to them.
+- The harvest in `data/chr21_chunks` (see
+  [Harvesting a chromosome](#harvesting-a-chromosome)).
+
+All commands below run from `clingen/`. Everything they write goes under
+`data/`, which is gitignored.
+
+### 1. The genome (once)
+
+The index is keyed by canonical HGVS, which vareffect computes from the
+reference genome in its flat binary format (a `.bin` with its `.bin.idx`). The
+demo uses chr21 alone, 46.7 MB:
+
+```bash
+scripts/build_chr21_genome.sh data/genome_chr21   # downloads UCSC hg38 chr21.fa.gz
+```
+
+A whole-genome index needs vareffect's full GRCh38 genome instead, about
+3.1 GB, built once with `vareffect-cli` (`cargo install vareffect-cli`, then
+`vareffect init` and `vareffect setup`, as vareffect's README describes; not
+run here).
+
+### 2. The index (once per harvest)
+
+```bash
+cargo run -p clingen-index --release -- build --chunks data/chr21_chunks \
+    --out data/index_chr21 --source gnomad41_genomes_chr21 \
+    --genome "$PWD/data/genome_chr21/chr21.bin" --harvest-date 2026-10-23
+```
+
+`--genome` is recorded in `manifest.json`, and both tools use it when they are
+not given a genome; an absolute path keeps the index usable from any
+directory. [chr21 index](#chr21-index) has its size and the `validate` run.
+
+### 3. The tools
+
+ClinGen support is an optional cargo feature in both, off by default. vep-rs
+builds with your default toolchain, which must be 1.94.1 or newer for the
+feature; fastVEP's `rust-toolchain.toml` selects `stable`.
+
+```bash
+(cd ../vep-rs && cargo build --release -p vep-cli --features clingen --bin vep)
+(cd ../fastVEP && cargo build --release -p fastvep-cli --features clingen)
+```
+
+- **vep-rs:** `--plugin ClinGen,index=DIR[,genome=PATH]` adds the CSQ
+  subfields `ClinGen_CAID` and `ClinGen_HGVSg`. `genome=` defaults to the
+  manifest's. With `--vcf` output it needs no FASTA and no cache; without
+  `--json_cache` every allele is reported `intergenic_variant`, which is
+  enough for the ClinGen fields. See vep-rs `docs/plugins/clingen.md`.
+- **fastVEP:** the index directory goes, under any name, inside the directory
+  given to `--sa-dir`, one index per `--sa-dir`. It adds INFO
+  `FV_CLINGEN=ALLELE|CAID|HGVSG`, one entry per ALT (in JSON, `clingen` with
+  `caid` and `hgvsg`). `--clingen-genome PATH` overrides the manifest's
+  genome, and `--sa-only` skips consequence prediction, so no GFF3 or FASTA is
+  needed. See fastVEP `docs/SUPPLEMENTARY_ANNOTATIONS.md`.
+
+For fastVEP, a symlink puts the index in an `--sa-dir`:
+
+```bash
+mkdir -p data/sa_clingen && ln -sfn ../index_chr21 data/sa_clingen/clingen_chr21
+```
+
+Both tools print one tally on stderr at the end of the run:
+`ClinGen: found=… not_in_index=… ref_mismatch=… unsupported=…`.
+
+### 4. Run the toy VCF
 
 [`examples/toy.vcf`](examples/toy.vcf) (GRCh38):
 
@@ -79,7 +163,172 @@ chrM	3243	melas	A	G	.	PASS	.
 chr21	10000000	bad_ref	A	G	.	PASS	.
 ```
 
-Run:
+On macOS, `sandbox-exec` runs a command with all network access denied, which
+shows that annotating makes no network calls. Elsewhere, leave `offline` out.
+
+```bash
+offline() { sandbox-exec -p '(version 1)(allow default)(deny network*)' "$@"; }
+offline curl -sS https://example.com   # curl: (6) Could not resolve host: example.com
+```
+
+**vep-rs:**
+
+```bash
+mkdir -p data/toy
+offline ../vep-rs/target/release/vep -i examples/toy.vcf -o data/toy/vep-rs.vcf \
+    --vcf --offline --assembly GRCh38 --force_overwrite --no_stats --quiet \
+    --plugin ClinGen,index=data/index_chr21
+grep -v '^#' data/toy/vep-rs.vcf | cut -f 3,8
+```
+
+Output (stderr, then the ID and INFO columns), 2026-10-23. The last two CSQ
+subfields are `ClinGen_CAID` and `ClinGen_HGVSg`:
+
+```
+clingen-allele: genome lookup failed for contig 'chrM' (reference genome error: chromosome 'chrM' not found in genome index); variants on this contig are reported Unsupported
+ClinGen: found=3 not_in_index=1 ref_mismatch=1 unsupported=1
+snv	CSQ=T|intergenic_variant|MODIFIER|||||||||||||||||||||CA749862939|NC_000021.9:g.5030578C>T
+ins_left	CSQ=A|intergenic_variant|MODIFIER|||||||||||||||||||||CA636937543|NC_000021.9:g.13189788dup
+ins_right	CSQ=A|intergenic_variant|MODIFIER|||||||||||||||||||||CA636937543|NC_000021.9:g.13189788dup
+del_novel	CSQ=-|intergenic_variant|MODIFIER||||||||||||||||||||||NC_000021.9:g.33000172del
+melas	CSQ=G|intergenic_variant|MODIFIER||||||||||||||||||||||
+bad_ref	CSQ=G|intergenic_variant|MODIFIER||||||||||||||||||||||
+```
+
+**fastVEP:**
+
+```bash
+offline ../fastVEP/target/release/fastvep annotate -i examples/toy.vcf \
+    -o data/toy/fastvep.vcf --sa-dir data/sa_clingen --sa-only --no-progress
+grep -v '^#' data/toy/fastvep.vcf | cut -f 3,8
+```
+
+Output (stderr, then the ID and INFO columns), 2026-10-23:
+
+```
+Annotating: examples/toy.vcf -> data/toy/fastvep.vcf
+Loaded 1 supplementary annotation source(s) from data/sa_clingen in 0.0s
+clingen-allele: genome lookup failed for contig 'chrM' (reference genome error: chromosome 'chrM' not found in genome index); variants on this contig are reported Unsupported
+ClinGen: found=3 not_in_index=1 ref_mismatch=1 unsupported=1
+snv	FV_CLINGEN=T|CA749862939|NC_000021.9:g.5030578C>T
+ins_left	FV_CLINGEN=CA|CA636937543|NC_000021.9:g.13189788dup
+ins_right	FV_CLINGEN=AA|CA636937543|NC_000021.9:g.13189788dup
+del_novel	FV_CLINGEN=T||NC_000021.9:g.33000172del
+melas	.
+bad_ref	.
+```
+
+Both tools give the same answer for every row:
+
+- **`snv`**: found. CA ID `CA749862939` and HGVS `NC_000021.9:g.5030578C>T`.
+- **`ins_left` / `ins_right`**: found, and the same allele. The one-base
+  insertion in a run of A's, written left-aligned and right-aligned, becomes
+  `NC_000021.9:g.13189788dup` both times, so both get `CA636937543`. This is
+  the representation independence the HGVS key is for. (vep-rs's CSQ
+  `Allele` is VEP's trimmed `A`; fastVEP's `ALLELE` is the VCF ALT.)
+- **`del_novel`**: HGVS but no CA ID. The deletion is valid, so
+  `NC_000021.9:g.33000172del` is computed, but the Registry has never
+  registered it, so the CA ID is empty (`not_in_index=1`).
+- **`melas`**: nothing. The demo genome and index are chr21 only, so chrM
+  cannot be converted to HGVS; `clingen-allele` warns once for the contig
+  and counts it `unsupported`. With a genome that has chrM and an index
+  harvested from chrM sites it would be looked up like the others; the live
+  Registry gives it `CA120560` (below).
+- **`bad_ref`**: nothing. REF `A` disagrees with the genome (the GRCh38 base
+  is `C`), so no HGVS is built (`ref_mismatch=1`). vep-rs still writes its
+  CSQ entry, with both ClinGen fields empty; fastVEP writes no `FV_CLINGEN`.
+
+For the four chr21 rows with a valid REF, these CA IDs and HGVS are exactly
+those of the live lookup below.
+
+## End-to-end check
+
+The first 100,000 rows of the chr21 harvest (chr21:5,029,882–5,310,755,
+10,304 of them indels) as a VCF, annotated by each tool offline, and every
+CA ID compared with the harvest's:
+
+```bash
+mkdir -p data/e2e
+{
+  printf '##fileformat=VCFv4.2\n##contig=<ID=21,length=46709983,assembly=GRCh38>\n'
+  printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n'
+  head -n 100000 data/chr21_chunks/chunk_00000.tsv |
+    awk -F'\t' -v OFS='\t' '{print $1, $2, ".", $3, $4, ".", "PASS", "."}'
+} > data/e2e/chr21_100k.vcf
+
+offline ../vep-rs/target/release/vep -i data/e2e/chr21_100k.vcf -o data/e2e/vep-rs.vcf \
+    --vcf --offline --assembly GRCh38 --force_overwrite --no_stats --quiet \
+    --plugin ClinGen,index=data/index_chr21
+offline ../fastVEP/target/release/fastvep annotate -i data/e2e/chr21_100k.vcf \
+    -o data/e2e/fastvep.vcf --sa-dir data/sa_clingen --sa-only --no-progress
+
+python3 -I scripts/e2e_crosscheck.py --harvest data/chr21_chunks \
+    --vcf-out data/e2e/vep-rs.vcf --tool vep-rs
+python3 -I scripts/e2e_crosscheck.py --harvest data/chr21_chunks \
+    --vcf-out data/e2e/fastvep.vcf --tool fastvep
+```
+
+Result (2026-10-23; clingen `feature/clingen-allele`, vep-rs `0d54dec`,
+fastVEP `47a059f`). The two annotation runs:
+
+```
+ClinGen: found=100000 not_in_index=0 ref_mismatch=0 unsupported=0
+Annotating: data/e2e/chr21_100k.vcf -> data/e2e/fastvep.vcf
+Loaded 1 supplementary annotation source(s) from data/sa_clingen in 0.0s
+ClinGen: found=100000 not_in_index=0 ref_mismatch=0 unsupported=0
+```
+
+The vep-rs check, then the fastVEP check (both exit 0):
+
+```
+vcf_alleles=100000 not_in_harvest=0 no_caid=0 excluded=0
+checked=100000 agree=100000 disagree=0 missing=0
+vcf_alleles=100000 not_in_harvest=0 no_caid=0 excluded=0
+checked=100000 agree=100000 disagree=0 missing=0
+```
+
+`e2e_crosscheck.py` reads `ClinGen_CAID` from the CSQ, by the position its
+`Format:` header gives it, or the CA ID field of `FV_CLINGEN`. It checks only
+the alleles the harvest gives a CA ID, exempts the rows listed in
+[`docs/known-differences.md`](docs/known-differences.md) (none), and exits 1
+if any CA ID disagrees or is missing. On stderr it lists the first ten
+problems and counts the alleles it did not check. It checks the alleles in the
+tool's output, so `checked` should equal the input's record count: a record a
+tool dropped would lower `checked` (and `vcf_alleles`), not count as missing.
+Its tests: `python3 -I scripts/test_e2e_crosscheck.py`.
+
+The HGVS fields (`ClinGen_HGVSg`, and the last `FV_CLINGEN` field) also equal
+the harvest's `HGVS_GRCh38` for all 100,000 alleles, checked separately.
+
+### Throughput
+
+Wall clock for the 100,000-record VCF: the median of 10 runs, with a warm
+page cache, release builds, and process start and `sandbox-exec` included.
+Apple M6 (12 cores: 2 Super, 4 Performance, 6 Efficiency), 32 GB, macOS
+27.0.1. Neither tool predicts consequences in these runs (vep-rs has no
+`--json_cache`, fastVEP runs `--sa-only`), so the times are VCF parsing, the
+ClinGen lookups and writing, without the consequence prediction a full run
+adds.
+
+| Run | default threads (12) | 1 thread |
+|---|---:|---:|
+| vep-rs, `--plugin ClinGen` | 0.078 s | 0.127 s |
+| vep-rs, no plugin | 0.034 s | 0.077 s |
+| fastVEP `--sa-only`, ClinGen index | 0.128 s | 0.167 s |
+| fastVEP `--sa-only`, empty `--sa-dir` | 0.061 s | 0.052 s |
+
+Threads are vep-rs's `--fork 0` (auto, 12 here) or `--fork 1`, and fastVEP's
+rayon default (12) or `RAYON_NUM_THREADS=1`. ClinGen adds 0.044–0.050 s per
+100,000 variants to vep-rs (0.4–0.5 µs each) and 0.067–0.115 s to fastVEP
+(0.7–1.2 µs each). On a one-record VCF every run takes 6–7 ms, so opening the
+index and the genome costs next to nothing. With ClinGen, vep-rs annotates
+about 1.3 million variants a second here, fastVEP about 0.8 million.
+
+## Harvest step: look up a toy VCF in the live Registry
+
+This is the lookup the harvester makes to build the offline index, run on the
+toy VCF against the live Registry, so it needs network access. Requirements:
+`bash`, `curl`, `awk` and Python ≥ 3.9 (standard library only).
 
 ```bash
 examples/lookup_vcf.sh examples/toy.vcf /tmp/toy_out | column -t -s $'\t'
@@ -111,36 +360,13 @@ What each row shows:
 - **`melas`**: mitochondrial m.3243A>G, the classic MELAS variant. The
   mitochondrial genome uses the `m.` prefix.
 - **`bad_ref`**: REF doesn't match GRCh38 (the reference base is `C`). The
-  Registry rejects the line, and the planned plugins will leave it
-  unannotated.
+  Registry rejects the line, and the offline tools leave it unannotated
+  ([toy run](#4-run-the-toy-vcf)).
 
 Full output, including the GRCh37 HGVS column, is in
 `/tmp/toy_out/chunks/chunk_00000.tsv`.
 
-## Planned: annotating a VCF offline
-
-The `clingen-index build` step works (see [chr21 index](#chr21-index)). The
-other commands are from the implementation plan: the adapters exist on local
-branches, but they are not yet documented here or cross-checked end to end.
-
-```bash
-# one-time: vareffect's GRCh38 genome binary (~3.1 GB) and the CA index
-vareffect-cli setup ...                      # see vareffect docs
-clingen-index build --chunks data/chr21_chunks --out data/index_chr21
-
-# vep-rs (built with --features clingen)
-vep -i toy.vcf --vcf -o out.vcf --plugin ClinGen,index=data/index_chr21,genome=GRCh38.bin
-#   → CSQ subfields ClinGen_CAID, ClinGen_HGVSg
-
-# fastVEP (built with --features clingen)
-fastvep annotate -i toy.vcf -o out.vcf --sa-dir sa/ --clingen-genome GRCh38.bin
-#   → INFO FV_CLINGEN=ALLELE|CAID|HGVSG
-```
-
-The offline results must match the recipe's CAID and HGVS columns; that
-agreement is one of the plan's acceptance tests.
-
-## Harvesting
+## Harvesting a chromosome
 
 ```bash
 harvest/extract_gnomad_sites.sh 21 data/gnomad41_chr21_sites.tsv     # stream gnomAD, keep CHROM POS REF ALT
@@ -162,32 +388,60 @@ harvesting beyond gnomAD-scale site lists.
 ## chr21 index
 
 Built on 2026-10-23 from the gnomAD v4.1 chr21 harvest, with the chr21-only
-genome (UCSC hg38 `chr21.fa.gz` → `chr21.bin`, 46.7 MB):
-
-```bash
-scripts/build_chr21_genome.sh data/genome_chr21
-cargo run -p clingen-index --release -- build --chunks data/chr21_chunks \
-    --out data/index_chr21 --source gnomad41_genomes_chr21 \
-    --genome "$PWD/data/genome_chr21/chr21.bin" --harvest-date 2026-10-23
-```
+genome (UCSC hg38 `chr21.fa.gz` → `chr21.bin`, 46.7 MB), by the commands in
+[steps 1 and 2](#annotating-a-vcf-offline) above.
 
 - **entries:** 10,958,882 from 10,958,898 rows. 16 pairs of gnomAD rows are
   one deletion written at two positions; each pair has one HGVS and one CA ID.
 - **`caid.fst`:** 129,852,406 bytes (about 11.8 bytes per entry), built in
   3.8 s.
 - **conformance:** `clingen-index validate` over all rows finds no mismatch
-  in any class (4.4 s). A 10,000-row sample is checked by
+  in any class (4.4 s):
+
+  ```bash
+  cargo run -p clingen-index --release -- validate --chunks data/chr21_chunks \
+      --genome data/genome_chr21/chr21.bin --mismatches data/chr21_mismatches.tsv
+  ```
+
+  A 10,000-row sample is checked by
   `CLINGEN_CHR21_GENOME=$PWD/data/genome_chr21/chr21.bin cargo test -p clingen-allele --test conformance --release`,
-  which also rewrites each sample indel padded and left-aligned. See
-  [`docs/known-differences.md`](docs/known-differences.md).
+  which also rewrites each sample indel padded and left-aligned.
+- **known differences:** none on chr21; the exclusion list in
+  [`docs/known-differences.md`](docs/known-differences.md) is empty, and that
+  file has the per-class counts.
+
+## Known limitations
+
+- **chr21-only demo data.** The genome and index here cover chr21 alone. A
+  variant anywhere else (the toy's `melas`, on chrM) gets nothing and is
+  counted `unsupported`. Whole-genome use needs the full GRCh38 genome and a
+  harvest of every chromosome, built into one index.
+- **LOCAL-ONLY path dependency.** Both adapter branches reach
+  `clingen-allele` by the path `../clingen/crates/clingen-allele`, so neither
+  builds, with or without the feature, unless this checkout sits next to
+  them. That lasts until `clingen-allele` is published.
+- **vep-rs skips some non-VCF input lines.** Every VCF allele is looked up,
+  but `--format ensembl` lines on strand -1, `--format region` lines other
+  than insertions, and `--format hgvs` insertions, duplications and `del` or
+  `delins` without their deleted bases get no ClinGen fields, because they do
+  not pin down one plus-strand allele. They are not counted in the tally
+  either.
+- **fastVEP takes one ClinGen index per `--sa-dir`.** A second one stops the
+  run. To cover several harvests, build one index from all of them
+  (`clingen-index build` takes `--chunks` once per harvest directory).
+- **fastVEP's library and web path trims indels.** `fastvep-web` and the
+  library hand every supplementary provider Ensembl-style trimmed indel
+  alleles rather than the VCF's. That is upstream fastVEP behaviour and
+  affects every provider; the ClinGen provider handles it
+  (`clingen-allele`'s `lookup_trimmed`).
 
 ## Layout
 
 ```
 crates/      clingen-allele (library) and clingen-index (CLI)
 harvest/     Registry harvester (Python, standard library only)
-scripts/     chr21 genome build and conformance-sample scripts
+scripts/     chr21 genome build, conformance sample, end-to-end cross-check
 examples/    toy VCF and lookup recipe
 docs/        design spec, implementation plan, known differences
-data/ logs/  harvest output, genome and index (gitignored)
+data/ logs/  harvest output, genome, index and run outputs (gitignored)
 ```
