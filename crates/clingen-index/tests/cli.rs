@@ -77,7 +77,7 @@ fn build_from_chunks() {
     assert_eq!(index.manifest().entries, 3);
     assert_eq!(index.manifest().assembly, "GRCh38");
     assert_eq!(index.manifest().format_version, 1);
-    assert_eq!(index.manifest().vareffect_version, "0.6");
+    assert_eq!(index.manifest().vareffect_version, "0.6.0");
     assert_eq!(index.manifest().harvest_date, "unknown");
     assert!(index.manifest().sources.is_empty());
     assert_eq!(index.manifest().genome, None);

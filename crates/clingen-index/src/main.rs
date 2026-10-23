@@ -16,8 +16,9 @@ use clap::{Args, Parser, Subcommand};
 use clingen_allele::{HgvsResult, IndexBuilder, Manifest, canonical_hgvs, parse_caid};
 use vareffect::FastaReader;
 
-/// Recorded in the manifest; matches the `vareffect` requirement in Cargo.toml.
-const VAREFFECT_VERSION: &str = "0.6";
+/// Recorded in the manifest: the exact vareffect release Cargo.toml pins,
+/// whose canonical HGVS the index keys are meant to match.
+const VAREFFECT_VERSION: &str = "0.6.0";
 
 /// How many malformed rows to show on stderr (all are counted).
 const MALFORMED_EXAMPLES: usize = 5;
@@ -489,4 +490,22 @@ fn validate(args: ValidateArgs) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The recorded version must be the exact one Cargo.toml pins, since the
+    /// index keys only match vareffect's HGVS for that release.
+    #[test]
+    fn vareffect_version_is_the_cargo_pin() {
+        let pin = format!("vareffect = \"={VAREFFECT_VERSION}\"");
+        assert!(
+            include_str!("../Cargo.toml")
+                .lines()
+                .any(|l| l.trim() == pin),
+            "Cargo.toml must pin `{pin}`"
+        );
+    }
 }

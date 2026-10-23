@@ -37,7 +37,9 @@ pub struct Manifest {
     pub harvest_date: String,
     /// Number of distinct HGVS keys in `caid.fst`.
     pub entries: u64,
-    /// Version of vareffect that normalised the harvested variants.
+    /// The vareffect release whose canonical HGVS the keys are meant to
+    /// match (the keys themselves are the Registry's strings). Informational:
+    /// nothing checks it at open.
     pub vareffect_version: String,
     /// Identifies the reference genome the index was built against, if known.
     #[serde(default)]
