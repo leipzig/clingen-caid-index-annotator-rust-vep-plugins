@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;
-use clingen_allele::CaIndex;
 use clingen_allele::test_support::tiny_genome;
+use clingen_allele::{Annotator, CaIndex};
 use tempfile::TempDir;
 
 fn cli() -> Command {
@@ -89,12 +89,23 @@ fn build_from_chunks() {
     assert_eq!(index.get("NC_000021.9:g.1A>C"), None);
 }
 
+/// An empty stand-in genome file at `dir/refs/hg38.bin`; `build` only
+/// records the path, it does not read the genome.
+fn stand_in_genome(dir: &Path) -> PathBuf {
+    let refs = dir.join("refs");
+    fs::create_dir_all(&refs).unwrap();
+    let path = refs.join("hg38.bin");
+    fs::write(&path, b"").unwrap();
+    path
+}
+
 #[test]
 fn build_records_provenance_in_manifest() {
     let tmp = TempDir::new().unwrap();
     let chunks = tmp.path().join("chunks");
     write_chunk(&chunks, "chunk_00000.tsv", &[SNV]);
     let out = tmp.path().join("index");
+    let genome = stand_in_genome(tmp.path());
 
     cli()
         .args(["build", "--chunks"])
@@ -102,15 +113,79 @@ fn build_records_provenance_in_manifest() {
         .arg("--out")
         .arg(&out)
         .args(["--source", "gnomad4.1-chr21", "--source", "clinvar"])
-        .args(["--genome", "/refs/hg38.bin", "--harvest-date", "2026-10-23"])
+        .arg("--genome")
+        .arg(&genome)
+        .args(["--harvest-date", "2026-10-23"])
         .assert()
         .success();
 
     let manifest = CaIndex::open(&out).unwrap().manifest().clone();
     assert_eq!(manifest.sources, ["gnomad4.1-chr21", "clinvar"]);
-    assert_eq!(manifest.genome.as_deref(), Some("/refs/hg38.bin"));
+    let canonical = fs::canonicalize(&genome).unwrap();
+    assert_eq!(manifest.genome.as_deref(), canonical.to_str());
     assert_eq!(manifest.harvest_date, "2026-10-23");
     assert_eq!(manifest.entries, 1);
+}
+
+#[test]
+fn build_records_a_relative_genome_as_an_absolute_canonical_path() {
+    let tmp = TempDir::new().unwrap();
+    write_chunk(&tmp.path().join("chunks"), "chunk_00000.tsv", &[SNV]);
+    let genome = stand_in_genome(tmp.path());
+
+    // Relative to the working directory, with a `..` to resolve.
+    cli()
+        .current_dir(tmp.path())
+        .args(["build", "--chunks", "chunks", "--out", "index"])
+        .args(["--genome", "refs/../refs/hg38.bin"])
+        .assert()
+        .success();
+
+    let index_dir = tmp.path().join("index");
+    let recorded = CaIndex::open(&index_dir).unwrap().manifest().genome.clone();
+    let canonical = fs::canonicalize(&genome).unwrap();
+    assert!(canonical.is_absolute());
+    assert_eq!(recorded.as_deref(), canonical.to_str());
+    // Consumers resolve the recorded path against the index directory; an
+    // absolute one comes back as it is, naming the genome given.
+    assert_eq!(
+        Annotator::genome_path_from_manifest(&index_dir),
+        Some(canonical)
+    );
+}
+
+#[test]
+fn build_with_a_missing_or_non_file_genome_exits_2_and_writes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let chunks = tmp.path().join("chunks");
+    write_chunk(&chunks, "chunk_00000.tsv", &[SNV]);
+    let not_a_file = tmp.path().join("a-directory.bin");
+    fs::create_dir_all(&not_a_file).unwrap();
+
+    for (genome, says) in [
+        (tmp.path().join("no-such-genome.bin"), "no-such-genome.bin"),
+        (not_a_file, "is not a file"),
+    ] {
+        let out = tmp.path().join("index");
+        let output = cli()
+            .args(["build", "--chunks"])
+            .arg(&chunks)
+            .arg("--out")
+            .arg(&out)
+            .arg("--genome")
+            .arg(&genome)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{}", genome.display());
+        let stderr = stderr_of(&output);
+        assert!(stderr.contains("--genome"), "stderr: {stderr}");
+        assert!(stderr.contains(says), "stderr: {stderr}");
+        assert!(
+            !out.exists(),
+            "{}: no index may be written",
+            genome.display()
+        );
+    }
 }
 
 #[test]

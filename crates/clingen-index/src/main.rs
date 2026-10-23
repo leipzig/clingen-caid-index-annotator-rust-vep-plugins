@@ -11,7 +11,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use clap::{Args, Parser, Subcommand};
 use clingen_allele::{HgvsResult, IndexBuilder, Manifest, canonical_hgvs, parse_caid};
 use vareffect::FastaReader;
@@ -69,9 +69,11 @@ struct BuildArgs {
     /// Label for the manifest's `sources`; repeatable.
     #[arg(long, value_name = "LABEL")]
     source: Vec<String>,
-    /// Genome path or label to record in the manifest.
+    /// vareffect genome binary (`genome.bin`) to record in the manifest. It
+    /// must exist, and is recorded as an absolute, canonical path, so the
+    /// tools find it whatever directory they run in.
     #[arg(long, value_name = "PATH")]
-    genome: Option<String>,
+    genome: Option<PathBuf>,
     /// Date the Registry was queried, recorded in the manifest.
     #[arg(long, value_name = "YYYY-MM-DD", default_value = "unknown")]
     harvest_date: String,
@@ -268,7 +270,28 @@ fn read_rows(
 // build
 // ---------------------------------------------------------------------------
 
+/// `--genome` as the manifest records it: absolute and canonical.
+///
+/// Consumers resolve a relative manifest path against the index directory,
+/// so recording one relative to the working directory would name another
+/// file.
+fn manifest_genome(path: &Path) -> Result<String> {
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("cannot resolve --genome {}", path.display()))?;
+    ensure!(
+        canonical.is_file(),
+        "--genome {} is not a file",
+        path.display()
+    );
+    canonical
+        .into_os_string()
+        .into_string()
+        .map_err(|p| anyhow!("--genome {} is not valid UTF-8", p.display()))
+}
+
 fn build(args: BuildArgs) -> Result<ExitCode> {
+    // Before any chunk is read, so a mistyped path fails fast.
+    let genome = args.genome.as_deref().map(manifest_genome).transpose()?;
     let files = chunk_files(&args.chunks.chunks)?;
 
     let mut builder = IndexBuilder::new();
@@ -301,7 +324,7 @@ fn build(args: BuildArgs) -> Result<ExitCode> {
         harvest_date: args.harvest_date,
         entries: 0,
         vareffect_version: VAREFFECT_VERSION.to_owned(),
-        genome: args.genome,
+        genome,
     };
     let entries = builder
         .finish(&args.out, manifest)
