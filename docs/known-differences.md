@@ -68,9 +68,10 @@ sample row it affects then goes in the exclusion list.
 
 The fenced block below, with info string `known-differences`, is read by
 `crates/clingen-allele/tests/conformance.rs`, and the end-to-end check
-(`scripts/e2e_crosscheck.py`, still to be written) will read it the same way.
+`scripts/e2e_crosscheck.py` reads it the same way.
 Each line is `CHROM POS REF ALT`, whitespace-separated, and names one row of
-the conformance sample that is exempt from the Registry comparison. Blank
+the conformance sample that is exempt from the Registry comparison (the
+end-to-end check exempts the same alleles in a tool's output). Blank
 lines are ignored. A malformed or repeated line, or a missing or second
 block, fails the reader; the conformance test also fails on a listed row that
 is not in the sample or that matches the Registry, so the list stays minimal.
