@@ -1,15 +1,17 @@
 //! `clingen-index`: build the CA-ID index from harvested chunks or sorted
 //! pairs, check `clingen-allele`'s canonical HGVS against what the Registry
 //! returned, prove every key of an index reachable from a VCF record, make the
-//! GRCh38 genome all of those read, and cut gene annotations into the query
-//! windows the Registry is asked about.
+//! GRCh38 genome all of those read, cut gene annotations into the query
+//! windows the Registry is asked about, and ask the Registry about those
+//! windows and about single sites.
 //!
 //! `build --chunks` and `validate` read the harvester's chunk files: no
 //! header, seven tab-separated columns
 //! `CHROM POS REF ALT CAID HGVS_GRCh38 HGVS_GRCh37`. `CAID` is `CA<digits>`
 //! when registered, empty when not, or `ERROR:<type>` when the Registry
-//! rejected the line. `build --sorted` reads `HGVS<TAB>CAID` pairs instead,
-//! `reach` an index, and `genome` a FASTA.
+//! rejected the line; `registry lookup` writes them. `build --sorted` reads
+//! `HGVS<TAB>CAID` pairs instead, as `registry enumerate` writes them, `reach`
+//! an index, and `genome` a FASTA.
 //!
 //! This file holds the command line and the dispatch; each subcommand lives in
 //! its own module. `chunks` is the reader `build` and `validate` share,
@@ -25,6 +27,7 @@ mod hgvs_vcf;
 mod input;
 mod reach;
 mod regions;
+mod registry;
 mod validate;
 
 use std::path::PathBuf;
@@ -95,6 +98,15 @@ enum Command {
     /// and counted. Exits 2 if the input is malformed or beyond the GRCh38
     /// contigs, if no window results, or if --out-dir already holds windows.
     Regions(regions::RegionsArgs),
+    /// Ask the ClinGen Allele Registry for CA IDs, by window or by site.
+    ///
+    /// Read-only: `enumerate` sends `GET /alleles?refseq=...` for each query
+    /// window of `regions` and writes `HGVS<TAB>CAID` pairs; `lookup` sends
+    /// sites as a VCF to `POST /alleles?file=vcf` and writes the harvester's
+    /// seven columns. Neither ever registers an allele. Network errors, 429
+    /// and 5xx are retried, six attempts in all, waiting 30 s and doubling;
+    /// any other failure exits 2 at once. Output appears only when complete.
+    Registry(registry::RegistryArgs),
 }
 
 #[derive(Args)]
@@ -141,5 +153,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Genome(args) => genome::genome(args),
         Command::Reach(args) => reach::reach(args),
         Command::Regions(args) => regions::regions(args),
+        Command::Registry(args) => registry::registry(args),
     }
 }

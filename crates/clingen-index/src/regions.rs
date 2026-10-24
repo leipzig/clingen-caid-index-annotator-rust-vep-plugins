@@ -453,8 +453,9 @@ fn plan_contig(contig: Contig, intervals: Vec<Span>, args: &RegionsArgs) -> Cont
     }
 }
 
-/// The name windows files and the `chrom` column use: `21`, `X`, `MT`.
-fn bare_name(contig: &Contig) -> &'static str {
+/// The name windows files and the `chrom` column use: `21`, `X`, `MT`. It is
+/// also the only form `registry lookup` takes, as the harvester did.
+pub(crate) fn bare_name(contig: &Contig) -> &'static str {
     if contig.mito {
         "MT"
     } else {

@@ -1,9 +1,9 @@
 //! Opening an input that may be gzipped, or standard input.
 //!
-//! `genome --fasta`, `build --sorted` and `regions` (its UCSC tables and BED)
-//! all take a path or `-`, plain or gzip/BGZF, and tell which by the data's
-//! first bytes rather than its name, so a pipe or a misnamed file reads the
-//! same as a `.gz`.
+//! `genome --fasta`, `build --sorted`, `regions` (its UCSC tables and BED) and
+//! `registry` (its windows and sites) all take a path or `-`, plain or
+//! gzip/BGZF, and tell which by the data's first bytes rather than its name,
+//! so a pipe or a misnamed file reads the same as a `.gz`.
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
