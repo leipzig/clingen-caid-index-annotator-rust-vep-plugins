@@ -13,23 +13,21 @@
 //! the kept contigs in memory: about 3.1 GB for all 25.
 
 use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Cursor, Read};
+use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::Args;
 use clingen_allele::{Contig, primary_contigs, resolve_contig};
-use flate2::read::MultiGzDecoder;
 use vareffect::fasta::{is_iupac_nucleotide, write_genome_binary};
+
+use crate::input::{input_label, open_input};
 
 /// The build recorded in the genome's index. The contig lengths checked below
 /// are GRCh38's, so no other value would be true.
 const BUILD: &str = "GRCh38";
-
-/// The two bytes every gzip member, and so every BGZF block, starts with.
-const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
 #[derive(Args)]
 pub(crate) struct GenomeArgs {
@@ -79,48 +77,6 @@ fn requested_contigs(names: &[String]) -> Result<Vec<Contig>> {
         wanted.push(contig);
     }
     Ok(wanted)
-}
-
-/// What the input is called in error messages.
-fn input_label(path: &Path) -> String {
-    if path == Path::new("-") {
-        "standard input".to_owned()
-    } else {
-        path.display().to_string()
-    }
-}
-
-/// Open `--fasta` for line reading, undoing gzip when the data starts with
-/// its magic.
-///
-/// A `.gz` may be BGZF, as `bgzip` and ClinVar's files are: many gzip members
-/// back to back, which `GzDecoder` would read only the first of, so
-/// `MultiGzDecoder` it is. The two magic bytes are read off the front and put
-/// back, since standard input cannot be rewound.
-fn open_fasta(path: &Path) -> Result<Box<dyn BufRead>> {
-    let mut source: Box<dyn Read> = if path == Path::new("-") {
-        Box::new(io::stdin().lock())
-    } else {
-        Box::new(File::open(path).with_context(|| format!("cannot open {}", path.display()))?)
-    };
-
-    // `take` + `read_to_end` keeps reading until two bytes or end of input; a
-    // pipe may hand over its first byte alone.
-    let mut head = Vec::with_capacity(GZIP_MAGIC.len());
-    source
-        .by_ref()
-        .take(GZIP_MAGIC.len() as u64)
-        .read_to_end(&mut head)
-        .with_context(|| format!("reading {}", input_label(path)))?;
-    let gzipped = head == GZIP_MAGIC;
-    let whole = Cursor::new(head).chain(source);
-
-    let bytes: Box<dyn Read> = if gzipped {
-        Box::new(MultiGzDecoder::new(whole))
-    } else {
-        Box::new(whole)
-    };
-    Ok(Box::new(BufReader::with_capacity(1 << 20, bytes)))
 }
 
 /// The contig a header line names, if it is one of `wanted`.
@@ -283,7 +239,7 @@ fn write_output(found: &[Found], out: &Path) -> Result<()> {
 /// the genome and print `contigs=<n> bases=<total>` on stderr.
 pub(crate) fn genome(args: GenomeArgs) -> Result<ExitCode> {
     let wanted = requested_contigs(&args.contigs)?;
-    let input = open_fasta(&args.fasta)?;
+    let input = open_input(&args.fasta)?;
     let found = read_contigs(input, &wanted)
         .with_context(|| format!("reading {}", input_label(&args.fasta)))?;
 

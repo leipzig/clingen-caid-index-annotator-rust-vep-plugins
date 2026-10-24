@@ -1,18 +1,22 @@
-//! `clingen-index`: build the CA-ID index from harvested chunks, check
-//! `clingen-allele`'s canonical HGVS against what the Registry returned, and
-//! make the GRCh38 genome both of those read.
+//! `clingen-index`: build the CA-ID index from harvested chunks or sorted
+//! pairs, check `clingen-allele`'s canonical HGVS against what the Registry
+//! returned, and make the GRCh38 genome both of those read.
 //!
-//! `build` and `validate` read the harvester's chunk files: no header, seven
-//! tab-separated columns `CHROM POS REF ALT CAID HGVS_GRCh38 HGVS_GRCh37`.
-//! `CAID` is `CA<digits>` when registered, empty when not, or `ERROR:<type>`
-//! when the Registry rejected the line. `genome` reads a FASTA instead.
+//! `build --chunks` and `validate` read the harvester's chunk files: no
+//! header, seven tab-separated columns
+//! `CHROM POS REF ALT CAID HGVS_GRCh38 HGVS_GRCh37`. `CAID` is `CA<digits>`
+//! when registered, empty when not, or `ERROR:<type>` when the Registry
+//! rejected the line. `build --sorted` reads `HGVS<TAB>CAID` pairs instead,
+//! and `genome` a FASTA.
 //!
 //! This file holds the command line and the dispatch; each subcommand lives in
-//! its own module, and `chunks` is the reader `build` and `validate` share.
+//! its own module. `chunks` is the reader `build` and `validate` share, and
+//! `input` opens the plain-or-gzip inputs of `build --sorted` and `genome`.
 
 mod build;
 mod chunks;
 mod genome;
+mod input;
 mod validate;
 
 use std::path::PathBuf;
@@ -35,12 +39,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Build the HGVS to CA ID index from harvested chunks.
+    /// Build the HGVS to CA ID index from harvested chunks or sorted pairs.
     ///
-    /// Indexes every row whose CAID parses and whose HGVS_GRCh38 is non-empty,
-    /// and prints a one-line summary on stderr. Exits 2 if one HGVS was
-    /// harvested with two different CA IDs.
-    Build(BuildArgs),
+    /// With --chunks, indexes every row whose CAID parses and whose
+    /// HGVS_GRCh38 is non-empty, sorting them in memory. With --sorted,
+    /// streams `HGVS<TAB>CAID` pairs already in byte order into the index in
+    /// constant memory. Prints a one-line summary on stderr. Exits 2 if one
+    /// HGVS has two different CA IDs, or a --sorted pair is malformed or out
+    /// of order.
+    Build(build::BuildArgs),
     /// Compare canonical HGVS computed from the genome with the Registry's.
     ///
     /// Compares every row that has an HGVS_GRCh38 and no ERROR, registered or
@@ -62,28 +69,6 @@ pub(crate) struct ChunkArgs {
     /// Directory of `chunk_*.tsv` files (read in filename order); repeatable.
     #[arg(long, required = true, num_args = 1.., value_name = "DIR")]
     pub(crate) chunks: Vec<PathBuf>,
-}
-
-#[derive(Args)]
-pub(crate) struct BuildArgs {
-    #[command(flatten)]
-    pub(crate) chunks: ChunkArgs,
-    /// Directory to write `caid.fst` and `manifest.json` into. An index
-    /// already there is replaced by rename, so running readers keep the old
-    /// one and a failed build leaves it intact.
-    #[arg(long, value_name = "DIR")]
-    pub(crate) out: PathBuf,
-    /// Label for the manifest's `sources`; repeatable.
-    #[arg(long, value_name = "LABEL")]
-    pub(crate) source: Vec<String>,
-    /// vareffect genome binary (`genome.bin`) to record in the manifest. It
-    /// must exist, and is recorded as an absolute path (directory resolved,
-    /// file name kept), so the tools find it whatever directory they run in.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) genome: Option<PathBuf>,
-    /// Date the Registry was queried, recorded in the manifest.
-    #[arg(long, value_name = "YYYY-MM-DD", default_value = "unknown")]
-    pub(crate) harvest_date: String,
 }
 
 #[derive(Args)]
