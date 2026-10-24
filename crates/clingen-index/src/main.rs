@@ -1,16 +1,18 @@
-//! `clingen-index`: build the CA-ID index from harvested chunks, and check
-//! `clingen-allele`'s canonical HGVS against what the Registry returned.
+//! `clingen-index`: build the CA-ID index from harvested chunks, check
+//! `clingen-allele`'s canonical HGVS against what the Registry returned, and
+//! make the GRCh38 genome both of those read.
 //!
-//! Both subcommands read the harvester's chunk files: no header, seven
+//! `build` and `validate` read the harvester's chunk files: no header, seven
 //! tab-separated columns `CHROM POS REF ALT CAID HGVS_GRCh38 HGVS_GRCh37`.
 //! `CAID` is `CA<digits>` when registered, empty when not, or `ERROR:<type>`
-//! when the Registry rejected the line.
+//! when the Registry rejected the line. `genome` reads a FASTA instead.
 //!
 //! This file holds the command line and the dispatch; each subcommand lives in
-//! its own module, and `chunks` is the reader they share.
+//! its own module, and `chunks` is the reader `build` and `validate` share.
 
 mod build;
 mod chunks;
+mod genome;
 mod validate;
 
 use std::path::PathBuf;
@@ -46,6 +48,13 @@ enum Command {
     /// substitution mismatches (any class with --strict), 2 if the run could
     /// not complete.
     Validate(ValidateArgs),
+    /// Write a GRCh38 FASTA as the vareffect genome the other commands read.
+    ///
+    /// Keeps the requested primary contigs (all 25 by default), whatever
+    /// their FASTA names, under vareffect's names and in FASTA order, and
+    /// prints `contigs=<n> bases=<total>` on stderr. Exits 2 if a requested
+    /// contig is missing or repeated, or is not the length GRCh38 gives it.
+    Genome(genome::GenomeArgs),
 }
 
 #[derive(Args)]
@@ -111,5 +120,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Build(args) => build::build(args),
         Command::Validate(args) => validate::validate(args),
+        Command::Genome(args) => genome::genome(args),
     }
 }
