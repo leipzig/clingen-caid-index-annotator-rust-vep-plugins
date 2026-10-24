@@ -47,11 +47,12 @@ padded), but it has exactly one canonical HGVS, and so one CA ID.
 |---|---|
 | Harvester (`harvest/`): Registry lookup for a sites list | **works**; the [lookup recipe](#harvest-step-look-up-a-toy-vcf-in-the-live-registry) runs it |
 | gnomAD v4.1 chr21 harvest | **done** (2026-10-23): 10,958,898 sites, all registered |
-| `clingen-allele` crate (vareffect HGVS + local index) | **works**; on the local branch `feature/clingen-allele` |
-| `clingen-index` CLI (`build`, `validate`) | **works**; on the local branch `feature/clingen-allele` |
-| vep-rs plugin `--plugin ClinGen` | **works** offline; on a local vep-rs branch (`clingen-allele-plugin`), not pushed |
-| fastVEP provider (`FV_CLINGEN`) | **works** offline; on a local fastVEP branch (`clingen-allele-plugin`), not pushed |
-| chr21 conformance with the Registry | all 10,958,898 rows match the Registry's HGVS ([details](docs/known-differences.md)); none of them is a `delins` or on chrM, so those classes are unvalidated ([Known limitations](#known-limitations)) |
+| `clingen-allele` crate (vareffect HGVS + local index) | **works**; on local `main` |
+| `clingen-index` CLI (`build`, `validate`) | **works**; on local `main` |
+| vep-rs plugin `--plugin ClinGen` | **works** offline; merged into a local vep-rs `main`, not pushed |
+| fastVEP provider (`FV_CLINGEN`) | **works** offline; merged into a local fastVEP `master`, not pushed |
+| chr21 conformance with the Registry | all 10,958,898 rows match the Registry's HGVS ([details](docs/known-differences.md)) |
+| ClinVar 2026-10-19, every chromosome | all 4,571,909 harvested rows match the Registry's HGVS, 22,417 `delins` and 3,134 chrM among them; both tools give the Registry's CA ID for all 4,595,314 registered ClinVar alleles ([ClinVar coverage](#clinvar-coverage)) |
 | End-to-end check, first 100,000 chr21 sites | both tools: all 100,000 CA IDs agree with the harvest ([below](#end-to-end-check)) |
 | Demo data | chr21 only, genome and index (see [Known limitations](#known-limitations)) |
 
@@ -456,24 +457,88 @@ genome (UCSC hg38 `chr21.fa.gz` → `chr21.bin`, 46.7 MB), by the commands in
   [`docs/known-differences.md`](docs/known-differences.md) is empty, and that
   file has the per-class counts.
 
+## ClinVar coverage
+
+ClinVar's weekly GRCh38 VCF of 2026-10-19 (`clinvar.vcf.gz`, md5
+`e649bbb1dfe11baafa9feab81a7a7cdd`), every chromosome, looked up in the
+Registry and then annotated by both tools. Measured on 2026-10-24.
+
+- **records:** 4,599,326, each with one ALT. 2,060 cannot be looked up and
+  are set aside with a reason: 1,341 with `ALT=.` (reference-only records,
+  `g.N=`), 668 with a base other than A, C, G or T, and 51 on patch or alt
+  contigs (`NT_…`, `NW_…`).
+- **harvest:** 25,357 sites were already in the chr21 gnomAD harvest. The
+  other 4,571,909 were looked up in 19 requests of 250,000 (about 10 minutes,
+  no retries): 4,569,957 registered, 1,952 not (456 of them SNVs, presumably
+  too new for the Registry), and no errors.
+- **conformance:** `validate` against a whole-genome binary matches every
+  one of the 4,571,909 rows: substitution 4,242,074, del 204,832, dup
+  82,861, ins 16,591, `delins` 22,417 and `m` (chrM) 3,134. It took 1.6 s.
+- **index:** `data/index_corpus` holds the chr21 harvest and the ClinVar
+  harvest: 15,528,839 entries (the 16 chr21 pairs above are the only shared
+  keys), `caid.fst` 182,447,000 bytes, built in 4.6 s with a peak of
+  1,045,839,872 bytes resident.
+- **end to end:** both tools annotate all 4,599,326 records offline, and
+  `e2e_crosscheck.py` gives the same line for each:
+  `checked=4595314 agree=4595314 disagree=0 missing=0`. The tallies are
+  `found=4595314 not_in_index=1952 ref_mismatch=0`, with `unsupported=719`
+  for vep-rs and `unsupported=2060` for fastVEP; vep-rs drops `ALT=.`
+  records before any plugin sees them.
+- **bug found:** before `506ccba`, 53,136 of these alleles came out as, say,
+  `CA68622` where the Registry writes `CA068622`. The Registry zero-pads to
+  six digits (all 15,528,855 harvested IDs have at least six, and only
+  six-digit ones start with `0`), and `clingen-allele` now does too. chr21's
+  gnomAD alleles were registered late, so none of them has fewer than seven
+  digits.
+
+The whole-genome binary holds UCSC hg38's 25 primary contigs
+(`hg38.fa.gz`, md5 `1c9dcaddfa41027f17cd8f7a82c7293b`; 3,088,286,401 bytes).
+It was written with a one-off converter around vareffect's
+`write_genome_binary`; the regeneration pipeline adds this step to
+`clingen-index`. The rest, with `offline` as [above](#end-to-end-check):
+
+```bash
+cv=data/clinvar/20261019
+gunzip -c $cv/../download/clinvar.vcf.gz | awk -F'\t' -v OFS='\t' -v skipped=$cv/skipped.tsv '
+  BEGIN { split("1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X Y MT", p, " "); for (i in p) prim[p[i]] = 1 }
+  /^#/ { next }
+  { why = "" }
+  !($1 in prim)                    { why = "non_primary_contig" }
+  why == "" && $5 == "."           { why = "no_alt" }
+  why == "" && ($4 $5) ~ /[^ACGT]/ { why = "non_acgt" }
+  why != "" { print $1, $2, $3, $4, $5, why > skipped; next }
+  { print $1, $2, $4, $5 }' > $cv/sites.tsv
+cut -f1-4 data/chr21_chunks/chunk_*.tsv |
+  awk -F'\t' 'NR==FNR {seen[$0]=1; next} !($0 in seen)' - $cv/sites.tsv > $cv/to_query.tsv
+python3 -I harvest/query_registry.py $cv/to_query.tsv $cv/chunks
+
+./target/release/clingen-index validate --chunks $cv/chunks \
+    --genome data/genome_grch38/GRCh38.bin --mismatches $cv/mismatches.tsv
+./target/release/clingen-index build --chunks data/chr21_chunks $cv/chunks \
+    --out data/index_corpus --genome data/genome_grch38/GRCh38.bin \
+    --source gnomad41_genomes_chr21 --source clinvar_20261019 --harvest-date 2026-10-24
+mkdir -p data/sa_corpus && ln -sfn ../index_corpus data/sa_corpus/clingen
+```
+
+The cross-check reads one harvest directory, so it gets the ClinVar chunks
+plus a `chunk_99999.tsv` of the 25,357 chr21 rows for ClinVar sites. The
+tools read a VCF of ClinVar's first five columns, with a `##contig` line per
+primary contig, and run exactly as in the [end-to-end
+check](#end-to-end-check), with `index=data/index_corpus` and
+`--sa-dir data/sa_corpus`.
+
 ## Known limitations
 
 - **chr21-only demo data.** The genome and index here cover chr21 alone. A
   variant anywhere else (the toy's `melas`, on chrM) gets nothing and is
   counted `unsupported`. Whole-genome use needs the full GRCh38 genome and a
   harvest of every chromosome, built into one index.
-- **No Registry evidence yet for `delins` or chrM.** The chr21 harvest has
-  no `delins` rows and no `m.` rows (`validate` counts 0 of each), so for
-  those classes the HGVS `clingen-allele` computes has been compared with the
-  Registry's only for the two hand-checked examples in
-  `crates/clingen-allele/tests/hgvs_examples.rs`
-  (`NC_000021.9:g.33000017_33000018delinsTG` and `NC_012920.1:m.3243A>G`).
-  vareffect does not shift a `delins` 3′, so the Registry may write some of
-  them differently; such a difference would show up as misses
-  (`not_in_index`), not as wrong CA IDs. Validate the first harvest that has
-  these rows before trusting its index. The chr21 gnomAD harvest also holds
-  no MNV or other complex allele, so its index gives an MNV an HGVS but no CA
-  ID.
+- **`delins` and chrM rest on ClinVar alone.** The chr21 gnomAD harvest has
+  no `delins` and no `m.` rows. ClinVar 2026-10-19 has 22,417 and 3,134, and
+  every one matches the Registry ([ClinVar coverage](#clinvar-coverage)), but
+  vareffect does not shift a `delins` 3′, so a harvest with `delins` ClinVar
+  lacks could still differ; such a difference shows up as misses
+  (`not_in_index`), not as wrong CA IDs. Validate every new harvest.
 - **`clingen-index build` holds every row in memory.** It keeps and sorts all
   harvested (HGVS, CA ID) pairs in memory, about 68 bytes per row: the chr21
   build (10,958,898 rows) peaks at about 0.75 GB resident

@@ -57,13 +57,13 @@ Classes come from the Registry's HGVS. The chr21 harvest has no `m` rows
 (those are chrM), and no `delins` or `other` rows: every chr21 site is a
 substitution or a plain deletion, duplication or insertion.
 
-So `delins` and `m.` keys have no Registry evidence beyond the two
-hand-checked examples in `crates/clingen-allele/tests/hgvs_examples.rs`
-(`delins_revcomp`, `NC_000021.9:g.33000017_33000018delinsTG`, and
-`mito_m_prefix`, `NC_012920.1:m.3243A>G`). vareffect does not shift a
-`delins` 3′, which the design names as a risk. The first harvest with rows in
-those classes must be validated, and its counts recorded here, before its
-index is trusted.
+The first Registry evidence for those classes is ClinVar 2026-10-19, every
+chromosome, validated against a whole-genome binary on 2026-10-24: all
+4,571,909 harvested rows match (substitution 4,242,074, del 204,832, dup
+82,861, ins 16,591, `delins` 22,417, `m` 3,134; see the README's ClinVar
+coverage section). vareffect does not shift a `delins` 3′, which the design
+names as a risk, so every new harvest is still validated and its counts
+recorded here before its index is trusted.
 
 ## Patterns
 
