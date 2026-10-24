@@ -135,6 +135,16 @@ fn caid_parse_format() {
 
     assert_eq!(format_caid(120560), "CA120560");
     assert_eq!(parse_caid(&format_caid(749862939)), Some(749862939));
+
+    // The Registry zero-pads to six digits: every harvested ID with fewer
+    // than seven digits has exactly six, and no longer one starts with 0.
+    assert_eq!(format_caid(68622), "CA068622");
+    assert_eq!(format_caid(42), "CA000042");
+    assert_eq!(format_caid(0), "CA000000");
+    assert_eq!(format_caid(1019413128), "CA1019413128");
+    for id in ["CA068622", "CA000042", "CA120560", "CA1019413128"] {
+        assert_eq!(format_caid(parse_caid(id).unwrap()), id);
+    }
 }
 
 #[test]

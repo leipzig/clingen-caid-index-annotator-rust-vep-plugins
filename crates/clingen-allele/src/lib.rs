@@ -37,7 +37,7 @@ pub enum Error {
     #[error("genome {} is not GRCh38: {reason}", path.display())]
     GenomeNotGrch38 { path: PathBuf, reason: String },
     /// One HGVS key was harvested with two different CA IDs.
-    #[error("duplicate HGVS key {hgvs} maps to both CA{first} and CA{second}")]
+    #[error("duplicate HGVS key {hgvs} maps to both CA{first:06} and CA{second:06}")]
     DuplicateConflict {
         hgvs: String,
         first: u64,
@@ -58,7 +58,7 @@ mod tests {
         };
         assert_eq!(
             e.to_string(),
-            "duplicate HGVS key NC_000021.9:g.33000172dup maps to both CA1 and CA2"
+            "duplicate HGVS key NC_000021.9:g.33000172dup maps to both CA000001 and CA000002"
         );
 
         let e = Error::Io {

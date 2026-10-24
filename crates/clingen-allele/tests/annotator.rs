@@ -3,7 +3,7 @@
 //! The index holds two Registry keys on chr21:
 //!
 //! * `NC_000021.9:g.5030578C>T` is `CA749862939`
-//! * `NC_000021.9:g.33000172dup` is `CA42`
+//! * `NC_000021.9:g.33000172dup` is `CA000042`
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -105,7 +105,7 @@ fn found_via_any_representation() {
         [(33000166, &b"T"[..], &b"TA"[..]), (33000172, b"A", b"AA")]
     {
         let lookup = annotator.lookup("21", pos1, ref_allele, alt_allele);
-        assert_eq!(lookup.caid.as_deref(), Some("CA42"), "{pos1}");
+        assert_eq!(lookup.caid.as_deref(), Some("CA000042"), "{pos1}");
         assert_eq!(lookup.hgvs.as_deref(), Some("NC_000021.9:g.33000172dup"));
         assert_eq!(lookup.status, Status::Found);
     }
@@ -460,7 +460,7 @@ fn trimmed_insertion_matches_vcf_form() {
         trimmed,
         Lookup {
             hgvs: Some("NC_000021.9:g.33000172dup".to_string()),
-            caid: Some("CA42".to_string()),
+            caid: Some("CA000042".to_string()),
             status: Status::Found,
         }
     );

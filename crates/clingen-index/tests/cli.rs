@@ -342,8 +342,8 @@ fn build_conflict_exits_nonzero() {
         stderr.contains("NC_000021.9:g.33000172dup"),
         "stderr: {stderr}"
     );
-    assert!(stderr.contains("CA100"), "stderr: {stderr}");
-    assert!(stderr.contains("CA200"), "stderr: {stderr}");
+    assert!(stderr.contains("CA000100"), "stderr: {stderr}");
+    assert!(stderr.contains("CA000200"), "stderr: {stderr}");
     assert!(!tmp.path().join("index").join("caid.fst").exists());
 }
 

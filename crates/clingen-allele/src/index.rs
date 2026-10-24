@@ -302,7 +302,12 @@ pub fn parse_caid(s: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// Format a CA ID number the way the Registry prints it: `CA{n}`.
+/// Format a CA ID number the way the Registry prints it: `CA` and the number
+/// zero-padded to at least six digits (`CA068622`, `CA1019413128`).
+///
+/// Of the 15,528,855 IDs harvested from gnomAD chr21 and ClinVar, every one
+/// has at least six digits, and only six-digit ones start with `0`, so this
+/// reproduces each of them from its number.
 pub fn format_caid(n: u64) -> String {
-    format!("CA{n}")
+    format!("CA{n:06}")
 }
