@@ -1,7 +1,8 @@
 //! `clingen-index`: build the CA-ID index from harvested chunks or sorted
 //! pairs, check `clingen-allele`'s canonical HGVS against what the Registry
-//! returned, prove every key of an index reachable from a VCF record, and
-//! make the GRCh38 genome all of those read.
+//! returned, prove every key of an index reachable from a VCF record, make the
+//! GRCh38 genome all of those read, and cut gene annotations into the query
+//! windows the Registry is asked about.
 //!
 //! `build --chunks` and `validate` read the harvester's chunk files: no
 //! header, seven tab-separated columns
@@ -12,9 +13,9 @@
 //!
 //! This file holds the command line and the dispatch; each subcommand lives in
 //! its own module. `chunks` is the reader `build` and `validate` share,
-//! `input` opens the plain-or-gzip inputs of `build --sorted` and `genome`,
-//! `hgvs_class` is the edit class `validate` and `reach` report by, and
-//! `hgvs_vcf` turns a key back into the VCF record `reach` looks up.
+//! `input` opens the plain-or-gzip inputs of `build --sorted`, `genome` and
+//! `regions`, `hgvs_class` is the edit class `validate` and `reach` report by,
+//! and `hgvs_vcf` turns a key back into the VCF record `reach` looks up.
 
 mod build;
 mod chunks;
@@ -23,6 +24,7 @@ mod hgvs_class;
 mod hgvs_vcf;
 mod input;
 mod reach;
+mod regions;
 mod validate;
 
 use std::path::PathBuf;
@@ -79,6 +81,20 @@ enum Command {
     /// `unsupported`; reference alleles and unparseable keys are only
     /// counted), 2 if the run could not complete.
     Reach(reach::ReachArgs),
+    /// Cut gene annotations, or a BED file, into Registry query windows.
+    ///
+    /// Takes the exons or genes wanted from the UCSC ncbiRefSeq and knownGene
+    /// tables (or the intervals of a BED file), pads them, merges those close
+    /// together, cuts the result into windows of at most --max-window bases
+    /// and widens each by --flank into the span `registry enumerate` asks the
+    /// Registry for. Writes `windows_<chrom>_<NNNN>.tsv` files of at most
+    /// --batch windows (columns `chrom accession begin end core_begin
+    /// core_end`) and a `summary.tsv` into --out-dir, and prints
+    /// `contigs`, `windows`, `core_bp`, `query_bp` and `skipped_records` on
+    /// stderr. Records on contigs other than the 25 primary ones are skipped
+    /// and counted. Exits 2 if the input is malformed or beyond the GRCh38
+    /// contigs, if no window results, or if --out-dir already holds windows.
+    Regions(regions::RegionsArgs),
 }
 
 #[derive(Args)]
@@ -124,5 +140,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Validate(args) => validate::validate(args),
         Command::Genome(args) => genome::genome(args),
         Command::Reach(args) => reach::reach(args),
+        Command::Regions(args) => regions::regions(args),
     }
 }
