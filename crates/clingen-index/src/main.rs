@@ -1,22 +1,28 @@
 //! `clingen-index`: build the CA-ID index from harvested chunks or sorted
 //! pairs, check `clingen-allele`'s canonical HGVS against what the Registry
-//! returned, and make the GRCh38 genome both of those read.
+//! returned, prove every key of an index reachable from a VCF record, and
+//! make the GRCh38 genome all of those read.
 //!
 //! `build --chunks` and `validate` read the harvester's chunk files: no
 //! header, seven tab-separated columns
 //! `CHROM POS REF ALT CAID HGVS_GRCh38 HGVS_GRCh37`. `CAID` is `CA<digits>`
 //! when registered, empty when not, or `ERROR:<type>` when the Registry
 //! rejected the line. `build --sorted` reads `HGVS<TAB>CAID` pairs instead,
-//! and `genome` a FASTA.
+//! `reach` an index, and `genome` a FASTA.
 //!
 //! This file holds the command line and the dispatch; each subcommand lives in
-//! its own module. `chunks` is the reader `build` and `validate` share, and
-//! `input` opens the plain-or-gzip inputs of `build --sorted` and `genome`.
+//! its own module. `chunks` is the reader `build` and `validate` share,
+//! `input` opens the plain-or-gzip inputs of `build --sorted` and `genome`,
+//! `hgvs_class` is the edit class `validate` and `reach` report by, and
+//! `hgvs_vcf` turns a key back into the VCF record `reach` looks up.
 
 mod build;
 mod chunks;
 mod genome;
+mod hgvs_class;
+mod hgvs_vcf;
 mod input;
+mod reach;
 mod validate;
 
 use std::path::PathBuf;
@@ -62,6 +68,17 @@ enum Command {
     /// prints `contigs=<n> bases=<total>` on stderr. Exits 2 if a requested
     /// contig is missing or repeated, or is not the length GRCh38 gives it.
     Genome(genome::GenomeArgs),
+    /// Prove every index key is found again from a VCF record.
+    ///
+    /// Turns each key's HGVS (each under --prefix) into a VCF record with the
+    /// genome, looks the record up as the annotator does, and requires the
+    /// key's own CA ID back. Prints `keys`, the count of each outcome and a
+    /// per-class table on stdout, and example keys of each outcome other than
+    /// `reachable` on stderr. Exits 1 if any key finds another ID or none, or
+    /// its record is refused (`wrong_ca`, `not_found`, `ref_mismatch`,
+    /// `unsupported`; reference alleles and unparseable keys are only
+    /// counted), 2 if the run could not complete.
+    Reach(reach::ReachArgs),
 }
 
 #[derive(Args)]
@@ -106,5 +123,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Build(args) => build::build(args),
         Command::Validate(args) => validate::validate(args),
         Command::Genome(args) => genome::genome(args),
+        Command::Reach(args) => reach::reach(args),
     }
 }

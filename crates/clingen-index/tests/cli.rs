@@ -559,7 +559,16 @@ fn validate_counts_malformed_rows_without_aborting() {
 }
 
 #[test]
-fn validate_strict_exits_1_on_an_indel_mismatch() {
+fn validate_strict_exits_0_when_clean_and_1_on_an_indel_mismatch() {
+    // A run where every row matches passes --strict.
+    let (output, _) = validate(&[SNV], &["--strict"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr_of(&output)
+    );
+
     // The Registry places this dup one base before where we do, so the row
     // mismatches in the dup class only.
     let row = "21\t33000166\tT\tTA\tCA100\tNC_000021.9:g.33000171dup\t";
