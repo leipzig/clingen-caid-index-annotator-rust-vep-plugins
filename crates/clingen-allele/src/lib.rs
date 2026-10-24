@@ -10,9 +10,9 @@ pub mod test_support;
 use std::path::PathBuf;
 
 pub use annotator::{Annotator, Lookup, Stats, Status};
-pub use contig::{Contig, resolve_contig};
+pub use contig::{Contig, primary_contigs, resolve_contig};
 pub use hgvs::{HgvsResult, canonical_hgvs};
-pub use index::{CaIndex, IndexBuilder, Manifest, format_caid, parse_caid};
+pub use index::{CaIndex, IndexBuilder, Manifest, SortedIndexWriter, format_caid, parse_caid};
 
 /// Errors produced by the `clingen-allele` crate.
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +43,10 @@ pub enum Error {
         first: u64,
         second: u64,
     },
+    /// A key reached a [`SortedIndexWriter`] after one that sorts above it in
+    /// byte order, the order the FST must be written in.
+    #[error("keys out of order: {key} after {previous}")]
+    Unsorted { previous: String, key: String },
 }
 
 #[cfg(test)]

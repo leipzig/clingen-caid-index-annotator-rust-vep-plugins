@@ -268,6 +268,28 @@ impl Annotator {
             .map(|base| base.to_ascii_uppercase())
     }
 
+    /// The uppercase reference bases from `start1` to `end1` on `chrom`, both
+    /// 1-based and inclusive, as in an HGVS range like `g.33000166_33000172`.
+    ///
+    /// `None` for `start1` of 0, `start1` after `end1`, a contig name that is
+    /// not a GRCh38 primary contig, a contig the genome file does not carry,
+    /// or an `end1` past the end of the contig. Like
+    /// [`base_at`](Self::base_at) this is a plain genome read: nothing is
+    /// counted in [`stats`](Self::stats).
+    pub fn ref_seq(&self, chrom: &str, start1: u64, end1: u64) -> Option<Vec<u8>> {
+        if start1 == 0 || start1 > end1 {
+            return None;
+        }
+        let contig = resolve_contig(chrom)?;
+        // vareffect takes a 0-based, end-exclusive range.
+        let mut seq = self
+            .genome
+            .fetch_sequence(contig.vareffect_name, start1 - 1, end1)
+            .ok()?;
+        seq.make_ascii_uppercase();
+        Some(seq)
+    }
+
     /// Count one allele as [`Status::Unsupported`] without looking it up.
     ///
     /// For adapters that skip an allele before calling

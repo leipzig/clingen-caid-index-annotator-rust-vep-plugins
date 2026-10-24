@@ -401,6 +401,40 @@ fn base_at_reads_reference() {
 }
 
 #[test]
+fn ref_seq_returns_inclusive_span() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    // The T at 33000166 and the six As after it, both ends included.
+    assert_eq!(
+        annotator.ref_seq("21", 33000166, 33000172),
+        Some(b"TAAAAAA".to_vec())
+    );
+    assert_eq!(annotator.ref_seq("MT", 3243, 3243), Some(b"A".to_vec()));
+    // The last base of chr21 is still in range.
+    let chr21_len = CHR21_LEN as u64;
+    assert_eq!(
+        annotator.ref_seq("chr21", chr21_len, chr21_len),
+        Some(b"N".to_vec())
+    );
+}
+
+#[test]
+fn ref_seq_none_cases() {
+    let fx = Fixture::new();
+    let annotator = fx.annotator();
+    assert_eq!(annotator.ref_seq("21", 0, 33000166), None);
+    assert_eq!(annotator.ref_seq("21", 33000172, 33000166), None);
+    assert_eq!(annotator.ref_seq("foo", 1, 1), None);
+    // Supported contig that the genome file does not carry.
+    assert_eq!(annotator.ref_seq("1", 1000, 1000), None);
+    let chr21_len = CHR21_LEN as u64;
+    assert_eq!(annotator.ref_seq("21", chr21_len, chr21_len + 1), None);
+    assert_eq!(annotator.ref_seq("21", u64::MAX, u64::MAX), None);
+    // A genome read, not a lookup: nothing is counted.
+    assert_eq!(annotator.stats(), Stats::default());
+}
+
+#[test]
 fn genome_path_from_manifest_resolves_against_index_dir() {
     // No manifest at all.
     let empty = tempdir().unwrap();

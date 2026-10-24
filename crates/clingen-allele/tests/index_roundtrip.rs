@@ -1,9 +1,13 @@
-//! `IndexBuilder` -> `caid.fst` + `manifest.json` -> `CaIndex` round trips.
+//! `IndexBuilder` / `SortedIndexWriter` -> `caid.fst` + `manifest.json` ->
+//! `CaIndex` round trips.
 
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::Path;
 
-use clingen_allele::{CaIndex, Error, IndexBuilder, Manifest, format_caid, parse_caid};
+use clingen_allele::{
+    CaIndex, Error, IndexBuilder, Manifest, SortedIndexWriter, format_caid, parse_caid,
+};
 use tempfile::tempdir;
 
 fn manifest() -> Manifest {
@@ -512,4 +516,197 @@ fn open_fst_from_another_build_is_a_manifest_error() {
 fn ca_index_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<CaIndex>();
+}
+
+#[test]
+fn sorted_writer_matches_index_builder_bytes() {
+    let built = tempdir().unwrap();
+    build_thousand(built.path());
+
+    // The same pairs `build_thousand` adds, already in byte order (every
+    // position has seven digits).
+    let streamed = tempdir().unwrap();
+    let mut writer = SortedIndexWriter::create(streamed.path()).unwrap();
+    for (hgvs, caid) in numbered_keys(1000, 1_000) {
+        assert!(writer.push(&hgvs, caid).unwrap(), "{hgvs}");
+    }
+    assert_eq!(writer.finish(manifest()).unwrap(), 1000);
+
+    assert_eq!(
+        fs::read(streamed.path().join("caid.fst")).unwrap(),
+        fs::read(built.path().join("caid.fst")).unwrap()
+    );
+    assert_eq!(
+        CaIndex::open(streamed.path()).unwrap().manifest(),
+        CaIndex::open(built.path()).unwrap().manifest()
+    );
+    assert_eq!(file_names(streamed.path()), ["caid.fst", "manifest.json"]);
+}
+
+#[test]
+fn sorted_writer_skips_exact_repeats() {
+    let dir = tempdir().unwrap();
+    let key = "NC_000021.9:g.5030578C>T";
+    let mut writer = SortedIndexWriter::create(dir.path()).unwrap();
+    assert!(writer.push(key, 1).unwrap());
+    assert!(!writer.push(key, 1).unwrap());
+    assert_eq!(writer.finish(manifest()).unwrap(), 1);
+
+    let index = CaIndex::open(dir.path()).unwrap();
+    assert_eq!(index.get(key), Some(1));
+    assert_eq!(index.manifest().entries, 1);
+}
+
+#[test]
+fn sorted_writer_rejects_conflict() {
+    let dir = tempdir().unwrap();
+    build(dir.path(), &KEYS).unwrap();
+
+    let key = "NC_000021.9:g.5030578C>T";
+    let mut writer = SortedIndexWriter::create(dir.path()).unwrap();
+    assert!(writer.push(key, 1).unwrap());
+    match writer.push(key, 2).unwrap_err() {
+        Error::DuplicateConflict {
+            hgvs,
+            first,
+            second,
+        } => {
+            assert_eq!(hgvs, key);
+            assert_eq!((first, second), (1, 2));
+        }
+        other => panic!("expected DuplicateConflict, got {other:?}"),
+    }
+    // The error itself discards the build, before the writer is dropped.
+    assert_eq!(file_names(dir.path()), ["caid.fst", "manifest.json"]);
+
+    let index = CaIndex::open(dir.path()).unwrap();
+    for (hgvs, caid) in KEYS {
+        assert_eq!(index.get(hgvs), Some(caid), "{hgvs}");
+    }
+    assert_eq!(index.manifest().entries, 4);
+}
+
+#[test]
+fn sorted_writer_cannot_finish_after_an_error() {
+    let dir = tempdir().unwrap();
+    build(dir.path(), &KEYS).unwrap();
+
+    let mut writer = SortedIndexWriter::create(dir.path()).unwrap();
+    assert!(writer.push("b", 1).unwrap());
+    writer.push("a", 2).unwrap_err();
+    // Neither a later pair nor `finish` revives the discarded build.
+    writer.push("c", 3).unwrap_err();
+    match writer.finish(manifest()).unwrap_err() {
+        Error::Io { path, .. } => assert_eq!(path, dir.path().join("caid.fst.tmp")),
+        other => panic!("expected Io, got {other:?}"),
+    }
+
+    let index = CaIndex::open(dir.path()).unwrap();
+    for (hgvs, caid) in KEYS {
+        assert_eq!(index.get(hgvs), Some(caid), "{hgvs}");
+    }
+    assert_eq!(index.get("b"), None);
+    assert_eq!(file_names(dir.path()), ["caid.fst", "manifest.json"]);
+}
+
+#[test]
+fn sorted_writer_rejects_out_of_order() {
+    let dir = tempdir().unwrap();
+    let mut writer = SortedIndexWriter::create(dir.path()).unwrap();
+    assert!(writer.push("b", 1).unwrap());
+    let err = writer.push("a", 2).unwrap_err();
+    assert_eq!(err.to_string(), "keys out of order: a after b");
+    match err {
+        Error::Unsorted { previous, key } => {
+            assert_eq!(previous, "b");
+            assert_eq!(key, "a");
+        }
+        other => panic!("expected Unsorted, got {other:?}"),
+    }
+}
+
+#[test]
+fn sorted_writer_accepts_prefix_keys() {
+    let dir = tempdir().unwrap();
+    let mut writer = SortedIndexWriter::create(dir.path()).unwrap();
+    // A key sorts before every longer key it is a prefix of.
+    assert!(writer.push("NC_000021.9:g.12del", 1).unwrap());
+    assert!(writer.push("NC_000021.9:g.12delinsA", 2).unwrap());
+    assert_eq!(writer.finish(manifest()).unwrap(), 2);
+
+    let index = CaIndex::open(dir.path()).unwrap();
+    assert_eq!(index.get("NC_000021.9:g.12del"), Some(1));
+    assert_eq!(index.get("NC_000021.9:g.12delinsA"), Some(2));
+}
+
+#[test]
+fn sorted_writer_dropped_without_finish_leaves_old_index() {
+    let dir = tempdir().unwrap();
+    build(dir.path(), &KEYS).unwrap();
+
+    let mut writer = SortedIndexWriter::create(dir.path()).unwrap();
+    assert!(writer.push("NC_000021.9:g.1A>T", 7).unwrap());
+    assert!(dir.path().join("caid.fst.tmp").is_file());
+    drop(writer);
+
+    let index = CaIndex::open(dir.path()).unwrap();
+    for (hgvs, caid) in KEYS {
+        assert_eq!(index.get(hgvs), Some(caid), "{hgvs}");
+    }
+    assert_eq!(index.get("NC_000021.9:g.1A>T"), None);
+    assert_eq!(file_names(dir.path()), ["caid.fst", "manifest.json"]);
+}
+
+#[test]
+fn visit_prefix_walks_in_byte_order() {
+    let dir = tempdir().unwrap();
+    // Added out of order; the walk must come back in byte order.
+    let keys = [
+        ("NC_012920.1:m.3243A>G", 5),
+        ("NC_000021.9:g.5030578C>T", 3),
+        ("NC_000001.11:g.1000A>T", 1),
+        ("NC_000021.9:g.33000172dup", 2),
+        ("NC_000021.9:g.33000172del", 4),
+    ];
+    build(dir.path(), &keys).unwrap();
+    let index = CaIndex::open(dir.path()).unwrap();
+
+    let walk = |prefix: &[u8]| {
+        let mut seen = Vec::new();
+        index.visit_prefix(prefix, |key, caid| {
+            seen.push((String::from_utf8(key.to_vec()).unwrap(), caid));
+            ControlFlow::Continue(())
+        });
+        seen
+    };
+    let owned = |pairs: &[(&str, u64)]| -> Vec<(String, u64)> {
+        pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
+    };
+
+    assert_eq!(
+        walk(b"NC_000021.9:"),
+        owned(&[
+            ("NC_000021.9:g.33000172del", 4),
+            ("NC_000021.9:g.33000172dup", 2),
+            ("NC_000021.9:g.5030578C>T", 3),
+        ])
+    );
+    assert_eq!(
+        walk(&[]),
+        owned(&[
+            ("NC_000001.11:g.1000A>T", 1),
+            ("NC_000021.9:g.33000172del", 4),
+            ("NC_000021.9:g.33000172dup", 2),
+            ("NC_000021.9:g.5030578C>T", 3),
+            ("NC_012920.1:m.3243A>G", 5),
+        ])
+    );
+    assert_eq!(walk(b"NC_000022.11:"), owned(&[]));
+
+    let mut visits = 0;
+    index.visit_prefix(&[], |_, _| {
+        visits += 1;
+        ControlFlow::Break(())
+    });
+    assert_eq!(visits, 1);
 }

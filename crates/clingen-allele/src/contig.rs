@@ -68,7 +68,10 @@ static CONTIGS: [Contig; 25] = [
 ];
 
 /// The 25 GRCh38 primary contigs, chr1 to chr22, chrX, chrY, chrM.
-pub(crate) fn primary_contigs() -> &'static [Contig] {
+///
+/// Public so that tools which act on every supported contig (cutting a genome
+/// down to them, say) take the list from here rather than restating it.
+pub fn primary_contigs() -> &'static [Contig] {
     &CONTIGS
 }
 
