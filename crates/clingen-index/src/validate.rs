@@ -89,6 +89,12 @@ impl Tally {
         self.total[i] - self.matched[i]
     }
 
+    /// Whether any class, not only substitutions, has a compared row we did
+    /// not reproduce.
+    fn any_mismatches(&self) -> bool {
+        self.total.iter().zip(&self.matched).any(|(t, m)| t != m)
+    }
+
     fn write_table(&self, out: &mut impl Write) -> io::Result<()> {
         writeln!(out, "class\ttotal\tmatch\tpct")?;
         for class in Class::ALL {
@@ -127,7 +133,7 @@ fn ours(row: &Row, pos1: u64, genome: &FastaReader) -> (String, bool) {
 
 /// Run `validate`: compare every eligible row, write the mismatches to
 /// `args.mismatches`, print the per-class table on stdout, and exit 1 when a
-/// substitution mismatches.
+/// substitution mismatches (a mismatch in any class with `--strict`).
 pub(crate) fn validate(args: ValidateArgs) -> Result<ExitCode> {
     let files = chunk_files(&args.chunks.chunks)?;
     let genome = FastaReader::open(&args.genome)
@@ -186,7 +192,12 @@ pub(crate) fn validate(args: ValidateArgs) -> Result<ExitCode> {
         .write_table(&mut io::stdout().lock())
         .context("writing the class table to stdout")?;
 
-    Ok(if tally.substitution_mismatches() > 0 {
+    let failed = if args.strict {
+        tally.any_mismatches()
+    } else {
+        tally.substitution_mismatches() > 0
+    };
+    Ok(if failed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

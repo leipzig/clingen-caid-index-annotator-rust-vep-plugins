@@ -557,3 +557,43 @@ fn validate_counts_malformed_rows_without_aborting() {
     assert!(stderr.contains("malformed=2"), "stderr: {stderr}");
     assert!(stdout_of(&output).contains("\nsubstitution\t1\t1\t100.0\n"));
 }
+
+#[test]
+fn validate_strict_exits_1_on_an_indel_mismatch() {
+    // The Registry places this dup one base before where we do, so the row
+    // mismatches in the dup class only.
+    let row = "21\t33000166\tT\tTA\tCA100\tNC_000021.9:g.33000171dup\t";
+
+    // By default only substitution mismatches fail the run.
+    let (output, _) = validate(&[row], &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("\ndup\t1\t0\t0.0\n"),
+        "stdout: {}",
+        stdout_of(&output)
+    );
+
+    // With --strict any class does, and the table and mismatch TSV are the same.
+    let (output, tsv) = validate(&[row], &["--strict"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        stdout_of(&output).contains("\ndup\t1\t0\t0.0\n"),
+        "stdout: {}",
+        stdout_of(&output)
+    );
+    let data: Vec<&str> = tsv.lines().skip(1).collect();
+    assert_eq!(
+        data,
+        ["21\t33000166\tT\tTA\tdup\tNC_000021.9:g.33000171dup\tNC_000021.9:g.33000172dup"]
+    );
+}

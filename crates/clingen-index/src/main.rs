@@ -43,7 +43,8 @@ enum Command {
     ///
     /// Compares every row that has an HGVS_GRCh38 and no ERROR, registered or
     /// not, and prints per-class match rates on stdout. Exits 1 if any
-    /// substitution mismatches, 2 if the run could not complete.
+    /// substitution mismatches (any class with --strict), 2 if the run could
+    /// not complete.
     Validate(ValidateArgs),
 }
 
@@ -89,6 +90,11 @@ pub(crate) struct ValidateArgs {
     /// Write each mismatching row here as TSV.
     #[arg(long, value_name = "TSV")]
     pub(crate) mismatches: PathBuf,
+    /// Exit 1 on a mismatch in any class. Without it only substitution
+    /// mismatches fail the run; the others are still tallied and written to
+    /// the mismatches TSV.
+    #[arg(long)]
+    pub(crate) strict: bool,
 }
 
 fn main() -> ExitCode {
