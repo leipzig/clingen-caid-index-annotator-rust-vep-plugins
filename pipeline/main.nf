@@ -146,8 +146,11 @@ workflow REGENERATE {
     // records the sources (the region set and the Registry's date; the datasets' releases come
     // from the provenance files), the harvest date, and the genome: a built one relative to the
     // index, a given one by path.
-    KEYS(enumerated.join(COLLECT.out.harvest, failOnMismatch: true, failOnDuplicate: true)
-        .map { chrom, enums, harvest -> [chrom, accession(chrom), enums, harvest] })
+    KEYS(
+        enumerated.join(COLLECT.out.harvest, failOnMismatch: true, failOnDuplicate: true)
+            .map { chrom, enums, harvest -> [chrom, accession(chrom), enums, harvest] },
+        run.include_reference
+    )
     def manifest = dates.map { d ->
         [
             set: run.windowing.set,

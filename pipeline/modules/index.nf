@@ -193,21 +193,31 @@ process KEYS {
     input:
     // The chromosome's enumerated pairs (none when it had no windows) and its harvest.
     tuple val(chrom), val(accession), path(enums, stageAs: 'enum/*', arity: '0..*'), path(harvest)
+    val include_reference   // true: also index harvested reference alleles (--include_reference)
 
     output:
     // <accession>.tsv: HGVS<TAB>CAID in byte order, so the shards concatenated in the byte
     // order of their names are in index order.
     path "${accession}.tsv", emit: shard
-    // keys_<chrom>.tsv: header and one row: chrom accession enum_files enumerated harvested keys
+    // keys_<chrom>.tsv: header and one row: chrom accession enum_files enumerated harvested keys,
+    // harvested counting every registered harvest row (the report's harvest:registered)
     path "keys_${chrom}.tsv", emit: stats
 
     script:
+    // A String 'false' (the command line's, or a params file's) is true in a condition.
+    if (!(include_reference instanceof Boolean)) {
+        error("KEYS: include_reference must be a Boolean, not ${include_reference.getClass().simpleName} '${include_reference}'")
+    }
     // The registered harvest rows as pairs, as build --chunks takes them (a CA ID and a GRCh38
-    // HGVS). One HGVS with two CA IDs stays two lines, which build --sorted refuses.
+    // HGVS). One HGVS with two CA IDs stays two lines, which build --sorted refuses. A reference
+    // allele (HGVS ending '=') is left out unless include_reference, as ENUMERATE leaves them out:
+    // no harvested site is one today (MERGE_SITES takes only REF != ALT), but this way the index
+    // holds none by construction. The gate does not count them: a no-op delins cannot be told
+    // without its coordinates, which a harvest row lacks.
     """
     export LC_ALL=C
-    { cat /dev/null ${enums}; gzip -dc ${harvest} | awk -F'\\t' -v OFS='\\t' '
-          \$5 ~ /^CA[0-9]+\$/ && \$6 != "" { print \$6, \$5; n++ }
+    { cat /dev/null ${enums}; gzip -dc ${harvest} | awk -F'\\t' -v OFS='\\t' -v keep=${include_reference ? 1 : 0} '
+          \$5 ~ /^CA[0-9]+\$/ && \$6 != "" { n++; if (keep || \$6 !~ /=\$/) print \$6, \$5 }
           END { print n + 0 > "harvested.txt" }'; } |
         sort -u -S 2G -T . > ${accession}.tsv.partial
 

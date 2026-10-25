@@ -1,7 +1,7 @@
 // KEYS on tests/data: pairs_MT.tsv (the HGVS<TAB>CAID of the 58 registered rows of
 // harvest_MT.tsv, byte-sorted) handed in as two overlapping, unsorted enumerate outputs, and
 // harvest_MT.tsv itself (60 real ClinVar MT rows, two with their CA ID removed to stand for
-// alleles nobody registered) plus a row the Registry refused.
+// alleles nobody registered) plus a row the Registry refused, and a registered reference allele.
 
 nextflow_process {
 
@@ -21,6 +21,7 @@ nextflow_process {
             process {
                 """
                 input[0] = ['MT', 'NC_012920.1', [file('${one}'), file('${two}')], file('${harvest}')]
+                input[1] = false
                 """
             }
         }
@@ -44,6 +45,7 @@ nextflow_process {
             process {
                 """
                 input[0] = ['MT', 'NC_012920.1', [], file('${harvest}')]
+                input[1] = false
                 """
             }
         }
@@ -54,12 +56,57 @@ nextflow_process {
         }
     }
 
+    // No harvested site is a reference allele today (MERGE_SITES takes only REF != ALT), but the
+    // index leaves them out unless --include_reference by construction, not by its inputs.
+    [false, true].each { keep ->
+        test("KEYS ${keep ? 'keeps' : 'leaves out'} a harvested reference allele with include_reference ${keep}") {
+            def pairs
+            def reference = 'MT\t3308\tT\tT\tCA9000000002\tNC_012920.1:m.3308T=\tNC_012920.1:m.3308T='
+            when {
+                pairs = path("${projectDir}/tests/data/pairs_MT.tsv").readLines()
+                def harvest = TestFiles.write("${outputDir}/MT.tsv.gz",
+                    path("${projectDir}/tests/data/harvest_MT.tsv").readLines() + [reference])
+                process {
+                    """
+                    input[0] = ['MT', 'NC_012920.1', [], file('${harvest}')]
+                    input[1] = ${keep}
+                    """
+                }
+            }
+            then {
+                assert process.success
+                def expected = keep ? (pairs + ['NC_012920.1:m.3308T=\tCA9000000002']).toSorted() : pairs
+                assert path(process.out.shard[0]).readLines() == expected
+                // harvested counts every registered row, kept or not; keys what the index gets
+                assert path(process.out.stats[0]).readLines()[1] == "MT\tNC_012920.1\t0\t0\t59\t${expected.size()}".toString()
+            }
+        }
+    }
+
+    // The command line and a params file give the strict parser the String 'false', which is
+    // true in a Groovy condition; main.nf converts it once, and KEYS refuses anything else.
+    test("KEYS refuses an include_reference that is not a Boolean") {
+        when {
+            process {
+                """
+                input[0] = ['MT', 'NC_012920.1', [], file('${projectDir}/tests/data/harvest_MT.tsv')]
+                input[1] = 'false'
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).join('\n').contains("KEYS: include_reference must be a Boolean, not String 'false'")
+        }
+    }
+
     test("stub: KEYS") {
         options "-stub"
         when {
             process {
                 """
                 input[0] = ['MT', 'NC_012920.1', [], file('${projectDir}/tests/data/harvest_MT.tsv')]
+                input[1] = false
                 """
             }
         }
