@@ -1,0 +1,205 @@
+// CLINVAR_SITES on tests/data/clinvar_mini.vcf.gz: the whole header and 20 records of ClinVar's
+// weekly GRCh38 VCF of 2026-10-19 (fileDate 2026-10-19), in its order: 1 on chr1, 7 on chr21
+// (one with ALT=., one with a run of Ns in its ALT), 1 on chrY, 8 on MT (one with ALT=.), and 3
+// on NT_/NW_ contigs. It is three gzip members, as the real BGZF file is many; its .md5 beside it
+// is in NCBI's form (md5, then a file name).
+
+nextflow_process {
+
+    name    "CLINVAR_SITES"
+    script  "modules/sources.nf"
+    process "CLINVAR_SITES"
+    tag     "sources"
+
+    def miniMd5 = 'c9bfa41086774fccb61d11066c3810ea'   // md5 of tests/data/clinvar_mini.vcf.gz
+    def miniSize = '4165'
+
+    def mtSites = [
+        'MT\t3270\tCT\tC',
+        'MT\t3307\tA\tT',
+        'MT\t3308\tT\tAC',
+        'MT\t3308\tT\tC',
+        'MT\t3902\tACCTTGC\tGCAAGGT',
+        'MT\t4314\tTA\tT',
+        'MT\t4365\tC\tCA',
+    ]
+    def chr21Sites = [
+        '21\t31659714\tT\tA',
+        '21\t33026915\tA\tC',
+        '21\t33244934\tTTTC\tT',
+        '21\t33248696\tG\tGT',
+        '21\t33268482\tCA\tTG',
+    ]
+
+    // { file name: its lines } of one emitted list of site files.
+    def siteLines = { files -> files.collectEntries { f -> [new File(f).name, path(f).readLines()] } }
+    def reasons = { lines -> lines.countBy { it.split('\t')[-1] } }
+
+    test("CLINVAR_SITES applies the skip rules") {
+        when {
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/clinvar_mini.vcf.gz')
+                input[1] = file('${projectDir}/tests/data/clinvar_mini.vcf.gz.md5')
+                input[2] = (1..22).collect { n -> n.toString() } + ['X', 'Y', 'MT']
+                """
+            }
+        }
+        then {
+            assert process.success
+            def sites = siteLines(process.out.sites[0])
+            // One file per requested chromosome, even with no site; bare names everywhere.
+            assert sites.keySet() == (((1..22).collect { "$it" }) + ['X', 'Y', 'MT']).collect { "sites_${it}.tsv".toString() } as Set
+            assert sites['sites_21.tsv'] == chr21Sites
+            assert sites['sites_MT.tsv'] == mtSites
+            assert sites['sites_1.tsv'] == ['1\t69134\tA\tG']
+            assert sites['sites_Y.tsv'] == ['Y\t2786976\tT\tC']
+            assert sites.findAll { name, lines -> !(name in ['sites_1.tsv', 'sites_21.tsv', 'sites_Y.tsv', 'sites_MT.tsv']) }
+                .every { name, lines -> lines.isEmpty() }
+
+            // Every chromosome is in the run, so the records on other contigs are reported too.
+            def skipped = path(process.out.skipped[0]).readLines()
+            assert reasons(skipped) == [no_alt: 2, non_acgt: 1, non_primary_contig: 3]
+            assert skipped.collect { it.split('\t')[0..3].join(':') } == [
+                'clinvar:21:14144655:1551957', 'clinvar:21:32650172:1475797', 'clinvar:MT:1438:177708',
+                'clinvar:NT_113889.1:54175:2498237', 'clinvar:NT_187633.1:267335:2259098',
+                'clinvar:NW_009646201.1:83614:17735',
+            ]
+
+            assert path(process.out.date[0]).readLines() == ['2026-10-19']
+            assert path(process.out.sources[0]).readLines() == [
+                "clinvar\tclinvar_mini.vcf.gz\t${miniSize}\t-\t${miniMd5}\tchecked".toString(),
+            ]
+        }
+    }
+
+    test("CLINVAR_SITES for MT alone writes MT sites and MT skips only") {
+        when {
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/clinvar_mini.vcf.gz')
+                input[1] = file('${projectDir}/tests/data/clinvar_mini.vcf.gz.md5')
+                input[2] = ['MT']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert siteLines(process.out.sites[0]) == ['sites_MT.tsv': mtSites]
+            assert path(process.out.skipped[0]).readLines() == ['clinvar\tMT\t1438\t177708\tA\t.\tno_alt']
+        }
+    }
+
+    test("CLINVAR_SITES downloads latest and checks NCBI's md5") {
+        when {
+            params {
+                // its .md5 is read from the same URL + '.md5'
+                clinvar_url = "file://${projectDir}/tests/data/clinvar_mini.vcf.gz"
+            }
+            process {
+                """
+                input[0] = []
+                input[1] = []
+                input[2] = ['21']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert siteLines(process.out.sites[0]) == ['sites_21.tsv': chr21Sites]
+            assert reasons(path(process.out.skipped[0]).readLines()) == [no_alt: 1, non_acgt: 1]
+            assert path(process.out.date[0]).readLines() == ['2026-10-19']
+            def source = path(process.out.sources[0]).readLines()
+            assert source.size() == 1
+            def (name, url, size, modified, md5, check) = source[0].split('\t') as List
+            assert [name, url, size, md5, check] == ['clinvar', "file://${projectDir}/tests/data/clinvar_mini.vcf.gz".toString(), miniSize, miniMd5, 'checked']
+            assert modified ==~ /\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} GMT/
+        }
+    }
+
+    test("CLINVAR_SITES without an md5 records it as not checked") {
+        when {
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/clinvar_mini.vcf.gz')
+                input[1] = []
+                input[2] = ['21']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert siteLines(process.out.sites[0]) == ['sites_21.tsv': chr21Sites]
+            assert path(process.out.sources[0]).readLines() == [
+                "clinvar\tclinvar_mini.vcf.gz\t${miniSize}\t-\t${miniMd5}\tnot checked".toString(),
+            ]
+        }
+    }
+
+    test("CLINVAR_SITES md5 mismatch fails") {
+        when {
+            def md5 = new File("${outputDir}/clinvar_mini.vcf.gz.md5")
+            md5.parentFile.mkdirs()
+            md5.text = 'e649bbb1dfe11baafa9feab81a7a7cdd  clinvar_20261019.vcf.gz\n'
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/clinvar_mini.vcf.gz')
+                input[1] = file('${md5}')
+                input[2] = ['21']
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains(miniMd5)
+            assert process.errorReport.contains('e649bbb1dfe11baafa9feab81a7a7cdd')
+        }
+    }
+
+    // NCBI names contigs 21 and MT. A VCF that says chr21 would put every record on a contig
+    // outside the primary assembly, and a one-chromosome run would look up nothing, silently.
+    test("CLINVAR_SITES fails on a VCF with no record on a primary chromosome") {
+        when {
+            def vcf = new File("${outputDir}/clinvar_chr.vcf.gz")
+            vcf.parentFile.mkdirs()
+            vcf.withOutputStream { out ->
+                new java.util.zip.GZIPOutputStream(out).withWriter('UTF-8') { w ->
+                    w << '##fileformat=VCFv4.1\n##fileDate=2026-10-19\n'
+                    w << '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n'
+                    w << 'chr21\t33026915\t2306750\tA\tC\t.\t.\t.\n'
+                }
+            }
+            process {
+                """
+                input[0] = file('${vcf}')
+                input[1] = []
+                input[2] = ['21']
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('clinvar_chr.vcf.gz has no record on a primary chromosome')
+        }
+    }
+
+    test("stub: CLINVAR_SITES") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = []
+                input[1] = []
+                input[2] = ['21', 'MT']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert siteLines(process.out.sites[0]) == ['sites_21.tsv': [], 'sites_MT.tsv': []]
+            assert path(process.out.skipped[0]).readLines() == []
+            assert path(process.out.date[0]).readLines() == ['1970-01-01']
+            assert path(process.out.sources[0]).readLines().size() == 1
+        }
+    }
+}

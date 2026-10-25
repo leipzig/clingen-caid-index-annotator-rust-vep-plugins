@@ -137,7 +137,7 @@ process BUILD_INDEX {
     input:
     path shards, stageAs: 'shards/*'     // every <accession>.tsv; read in the byte order of their names
     tuple path(genome_bin, stageAs: 'genome/*'), path(genome_idx, stageAs: 'genome/*')
-    path provenance, stageAs: 'provenance/*'   // ucsc_sources.tsv, clinvar_date.txt, gnomad_files.tsv: for the sources
+    path provenance, stageAs: 'provenance/*'   // ucsc_sources.tsv, clinvar_{date.txt,sources.tsv}, gnomad_files.tsv: for the sources
 
     output:
     path 'index', emit: index            // caid.fst and manifest.json
@@ -248,7 +248,7 @@ process REPORT {
     path checks, stageAs: 'checks/*'             // validate_<chrom>.txt and reach_<chrom>.txt
     path stats, stageAs: 'keys/*'                // keys_<chrom>.tsv
     path skipped, stageAs: 'skipped/skipped_*.tsv'   // each source's skipped.tsv
-    path provenance, stageAs: 'provenance/*'     // ucsc_sources.tsv, clinvar_date.txt, gnomad_files.tsv
+    path provenance, stageAs: 'provenance/*'     // ucsc_sources.tsv, clinvar_{date.txt,sources.tsv}, gnomad_files.tsv
     path regions_summary, stageAs: 'regions_summary.tsv'
 
     output:

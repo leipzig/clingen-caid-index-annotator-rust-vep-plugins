@@ -238,6 +238,25 @@ nextflow_pipeline {
         }
     }
 
+    // A local --clinvar_vcf is for an exact rerun: NCBI's .md5 beside it is checked when it is
+    // there, and CLINVAR_SITES records the md5 as not checked when it is not.
+    test("stub: a local clinvar_vcf without an md5 beside it is accepted") {
+        when {
+            params {
+                def vcf = new File("${outputDir}/clinvar_20261019.vcf.gz")
+                vcf.parentFile.mkdirs()
+                vcf.bytes = new File("${projectDir}/tests/data/clinvar_mini.vcf.gz").bytes
+                chrom       = "21"
+                clinvar_vcf = vcf.path
+                outdir      = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.tasks().count { it.name ==~ /.*CLINVAR_SITES.*/ } == 1
+        }
+    }
+
     // gnomAD v4 has no chrM exomes, so MT gets no site list at all: gatherByChrom must still
     // hand MERGE_SITES an empty list for it, or MT would never reach KEYS and the index.
     test("stub: a chromosome with no site lists still reaches MERGE_SITES and the index") {

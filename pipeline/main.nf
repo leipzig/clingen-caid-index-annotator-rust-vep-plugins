@@ -74,7 +74,7 @@ workflow REGENERATE {
         CLINVAR_SITES(run.clinvar_vcf, run.clinvar_md5, chroms)
         siteFiles = siteFiles.mix(CLINVAR_SITES.out.sites.flatMap { files -> files.collect { f -> [chromOf(f), f] } })
         skipped = skipped.mix(CLINVAR_SITES.out.skipped)
-        provenance = provenance.mix(CLINVAR_SITES.out.date)
+        provenance = provenance.mix(CLINVAR_SITES.out.date, CLINVAR_SITES.out.sources)
     }
     def gnomadDatasets = run.datasets.findAll { d -> d.startsWith('gnomad_') }
     if (gnomadDatasets) {
@@ -161,13 +161,13 @@ def settings() {
     def clinvar = params.clinvar_vcf.toString()
     if (clinvar != 'latest') {
         clinvarVcf = file(clinvar)
-        clinvarMd5 = file("${clinvar}.md5")
         if (!clinvarVcf.exists()) {
             error("--clinvar_vcf ${clinvar}: no such file")
         }
-        if (!clinvarMd5.exists()) {
-            error("--clinvar_vcf ${clinvar}: no ${clinvarMd5.name} beside it (the md5 NCBI publishes with the VCF)")
-        }
+        // NCBI's .md5 beside it is checked when it is there; without it CLINVAR_SITES records
+        // the md5 as not checked, as a file kept for an exact rerun may have lost it.
+        def md5 = file("${clinvar}.md5")
+        clinvarMd5 = md5.exists() ? md5 : []
     }
 
     def genome = null

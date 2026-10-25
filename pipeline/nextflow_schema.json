@@ -54,7 +54,8 @@
                 },
                 "clinvar_vcf": {
                     "type": "string",
-                    "description": "latest (NCBI's weekly clinvar.vcf.gz), or a local clinvar.vcf.gz, with its .md5 beside it, for an exact rerun.",
+                    "description": "latest (NCBI's weekly clinvar.vcf.gz), or a local clinvar.vcf.gz, for an exact rerun.",
+                    "help_text": "A local file's .md5 beside it (the md5 NCBI publishes with the VCF) is checked when it is there; without one, the sources report records the md5 as not checked.",
                     "default": "latest",
                     "pattern": "^(latest|\\S+\\.vcf\\.gz)$"
                 },
@@ -204,6 +205,13 @@
                     "type": "string",
                     "description": "UCSC hg38 download directory (transcript tables and hg38.fa.gz).",
                     "default": "https://hgdownload.soe.ucsc.edu/goldenPath/hg38",
+                    "pattern": "^(https?|file)://\\S+$",
+                    "hidden": true
+                },
+                "clinvar_url": {
+                    "type": "string",
+                    "description": "NCBI's weekly GRCh38 ClinVar VCF, read for --clinvar_vcf latest; its md5 is at the same URL + .md5.",
+                    "default": "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz",
                     "pattern": "^(https?|file)://\\S+$",
                     "hidden": true
                 }

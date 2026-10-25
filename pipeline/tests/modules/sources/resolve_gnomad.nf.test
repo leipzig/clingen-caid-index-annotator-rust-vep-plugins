@@ -1,0 +1,100 @@
+// RESOLVE_GNOMAD against tests/data/gnomad_listing.json: the GCS JSON API listing of the gnomAD
+// bucket cut down to what these tests need (real names, sizes and md5s of 2026-10-24): the
+// release prefixes, chr21 under release/4.1/ and release/4.1.1/ (genomes and exomes), v3.1's
+// chr21 and chrM genomes files, and release/4.1.2/, which holds only constraint/. curl ignores
+// the query of a file:// URL, so every listing request gets this one document.
+
+nextflow_process {
+
+    name    "RESOLVE_GNOMAD"
+    script  "modules/sources.nf"
+    process "RESOLVE_GNOMAD"
+    tag     "sources"
+
+    def gcs = 'https://storage.googleapis.com/gcp-public-data--gnomad'
+
+    test("RESOLVE_GNOMAD picks 4.1.1 and the v3.1 chrM file") {
+        when {
+            params {
+                gnomad_listing_url = "file://${projectDir}/tests/data/gnomad_listing.json"
+            }
+            process {
+                """
+                input[0] = 'latest'
+                input[1] = ['21', 'MT']
+                input[2] = ['gnomad_genomes', 'gnomad_exomes']
+                """
+            }
+        }
+        then {
+            assert process.success
+            // 4.1.2 is the highest release but has no vcf/genomes/ files; gnomAD v4 has no chrM,
+            // so MT streams v3.1's genomes file and has no exomes file.
+            assert path(process.out.files[0]).readLines() == [
+                "gnomad_genomes\t21\t${gcs}/release/4.1.1/vcf/genomes/gnomad.genomes.v4.1.1.sites.chr21.vcf.bgz\tvQiPhuGSSpcCxbpdxeFgUw==\t7796525262",
+                "gnomad_genomes\tMT\t${gcs}/release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz\t0O8r2IKuRCNol9dDy1Uozw==\t5150029",
+                "gnomad_exomes\t21\t${gcs}/release/4.1.1/vcf/exomes/gnomad.exomes.v4.1.1.sites.chr21.vcf.bgz\t+LESk41o6mHJ3MS6JuCe8Q==\t2258869203",
+            ].collect { it.toString() }
+        }
+    }
+
+    test("RESOLVE_GNOMAD takes a pinned version from the AWS mirror, with the md5 from GCS") {
+        when {
+            params {
+                gnomad_listing_url = "file://${projectDir}/tests/data/gnomad_listing.json"
+                gnomad_mirror      = 'aws'
+            }
+            process {
+                """
+                input[0] = '4.1'
+                input[1] = ['21']
+                input[2] = ['gnomad_exomes']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert path(process.out.files[0]).readLines() == [
+                "gnomad_exomes\t21\thttps://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz\tfKbVGkJCW4V+3bRte8WDLQ==\t2250319809",
+            ]
+        }
+    }
+
+    test("RESOLVE_GNOMAD fails on a chromosome the release lacks") {
+        when {
+            params {
+                gnomad_listing_url = "file://${projectDir}/tests/data/gnomad_listing.json"
+            }
+            process {
+                """
+                input[0] = 'latest'
+                input[1] = ['21', '22']
+                input[2] = ['gnomad_genomes']
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('release/4.1.1/vcf/genomes/gnomad.genomes.v4.1.1.sites.chr22.vcf.bgz')
+        }
+    }
+
+    test("stub: RESOLVE_GNOMAD lists no exomes file for MT") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = 'latest'
+                input[1] = ['21', 'MT']
+                input[2] = ['gnomad_genomes', 'gnomad_exomes']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert path(process.out.files[0]).readLines().collect { it.tokenize('\t')[0..1] } == [
+                ['gnomad_genomes', '21'], ['gnomad_genomes', 'MT'], ['gnomad_exomes', '21'],
+            ]
+        }
+    }
+}

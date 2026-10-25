@@ -1,0 +1,81 @@
+// FETCH_UCSC reads, through file://, a UCSC hg38 download directory laid out under the test's
+// output directory from tests/data/ucsc_mini_{ncbiRefSeq,knownGene}.txt.gz: real rows of both
+// tables, SOD1 and its neighbours on chr21, and on chrM the coding MT-ND1 (with ND2 in
+// ncbiRefSeq, two tRNAs in knownGene). ncbiRefSeq rows keep their leading bin column;
+// knownGene rows have none.
+
+nextflow_process {
+
+    name    "FETCH_UCSC"
+    script  "modules/sources.nf"
+    process "FETCH_UCSC"
+    tag     "sources"
+
+    // Lays out <dir>/database/<table>.txt.gz from the mini tables; returns <dir> as a file:// URL.
+    def ucscMirror = { String projectDir, String dir ->
+        def database = new File(dir, 'database')
+        database.mkdirs()
+        ['ncbiRefSeq', 'knownGene'].each { table ->
+            java.nio.file.Files.copy(
+                new File("${projectDir}/tests/data/ucsc_mini_${table}.txt.gz").toPath(),
+                new File(database, "${table}.txt.gz").toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
+        return "file://${dir}".toString()
+    }
+    def md5 = { File f -> java.security.MessageDigest.getInstance('MD5').digest(f.bytes).encodeHex().toString() }
+
+    test("FETCH_UCSC downloads both tables and records their size and Last-Modified") {
+        when {
+            params {
+                ucsc_base = ucscMirror(projectDir, "${outputDir}/hg38")
+            }
+        }
+        then {
+            assert process.success
+            def (refseq, gencode) = process.out.tables[0]
+            def fixtures = ['ncbiRefSeq', 'knownGene'].collect { new File("${projectDir}/tests/data/ucsc_mini_${it}.txt.gz") }
+            assert new File(refseq).name == 'ncbiRefSeq.txt.gz'
+            assert new File(gencode).name == 'knownGene.txt.gz'
+            assert [md5(new File(refseq)), md5(new File(gencode))] == fixtures.collect { md5(it) }
+
+            // UCSC publishes no md5 for the tables: the record holds what was read, and when
+            // the server says it last changed.
+            def rows = path(process.out.sources[0]).readLines().collect { it.split('\t') as List }
+            assert rows.collect { it[0] } == ['ucsc_ncbiRefSeq', 'ucsc_knownGene']
+            assert rows.collect { it[1] } == ['ncbiRefSeq', 'knownGene'].collect { "file://${outputDir}/hg38/database/${it}.txt.gz".toString() }
+            assert rows.collect { it[2] } == fixtures.collect { it.length().toString() }
+            assert rows.every { it[3] ==~ /\w{3}, \d{2} \w{3} \d{4} \d{2}:\d{2}:\d{2} GMT/ }
+            assert rows.collect { it[4] } == fixtures.collect { md5(it) }
+            assert rows.every { it[5] == 'none published' }
+        }
+    }
+
+    test("FETCH_UCSC fails on a truncated table") {
+        when {
+            params {
+                ucsc_base = ucscMirror(projectDir, "${outputDir}/hg38")
+                def table = new File("${outputDir}/hg38/database/knownGene.txt.gz")
+                table.bytes = table.bytes[0..<100] as byte[]
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('knownGene.txt.gz')
+        }
+    }
+
+    test("stub: FETCH_UCSC") {
+        options "-stub"
+        when {
+            params {
+                ucsc_base = 'https://stub.invalid/hg38'
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.tables[0].collect { new File(it).name } == ['ncbiRefSeq.txt.gz', 'knownGene.txt.gz']
+            assert path(process.out.sources[0]).exists()
+        }
+    }
+}

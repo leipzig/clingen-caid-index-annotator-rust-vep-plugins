@@ -1,0 +1,33 @@
+{
+    "GNOMAD_SITES splits multi-ALT and skips star": {
+        "content": [
+            {
+                "0": [
+                    [
+                        "gnomad_genomes",
+                        "21",
+                        "sites.tsv:md5,89a9386e9057d87f86ddb27cfa4d5812"
+                    ]
+                ],
+                "1": [
+                    "skipped.tsv:md5,05098235daa1ea8f2f93c796f03241b8"
+                ],
+                "sites": [
+                    [
+                        "gnomad_genomes",
+                        "21",
+                        "sites.tsv:md5,89a9386e9057d87f86ddb27cfa4d5812"
+                    ]
+                ],
+                "skipped": [
+                    "skipped.tsv:md5,05098235daa1ea8f2f93c796f03241b8"
+                ]
+            }
+        ],
+        "timestamp": "2026-10-24T19:57:48.726596",
+        "meta": {
+            "nf-test": "0.9.5",
+            "nextflow": "26.04.7"
+        }
+    }
+}

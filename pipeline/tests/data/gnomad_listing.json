@@ -1,0 +1,100 @@
+{
+  "prefixes": [
+    "release/2.1.1/",
+    "release/2.1/",
+    "release/3.0.1/",
+    "release/3.0/",
+    "release/3.1.1/",
+    "release/3.1.2/",
+    "release/3.1.3/",
+    "release/3.1/",
+    "release/4.0/",
+    "release/4.1.1/",
+    "release/4.1.2/",
+    "release/4.1/",
+    "release/lr/",
+    "release/v4.0/"
+  ],
+  "items": [
+    {
+      "name": "release/",
+      "size": "0",
+      "md5Hash": "1B2M2Y8AsgTpgAmY7PhCfg=="
+    },
+    {
+      "name": "release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chr21.vcf.bgz",
+      "size": "35227491392",
+      "md5Hash": "WPvl5t2CBBpeIxvI5QwTag=="
+    },
+    {
+      "name": "release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chr21.vcf.bgz.tbi",
+      "size": "41190",
+      "md5Hash": "tcrW5ifNgOXoQEpT64ewTg=="
+    },
+    {
+      "name": "release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chrM.reduced_annotations.tsv",
+      "size": "1051147",
+      "md5Hash": "RakbIt3DwRdsED1K/uCA9Q=="
+    },
+    {
+      "name": "release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz",
+      "size": "5150029",
+      "md5Hash": "0O8r2IKuRCNol9dDy1Uozw=="
+    },
+    {
+      "name": "release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz.tbi",
+      "size": "108",
+      "md5Hash": "FPGHGfXYagCgDEdTaJE/jw=="
+    },
+    {
+      "name": "release/4.1.1/vcf/exomes/gnomad.exomes.v4.1.1.sites.chr21.vcf.bgz",
+      "size": "2258869203",
+      "md5Hash": "+LESk41o6mHJ3MS6JuCe8Q=="
+    },
+    {
+      "name": "release/4.1.1/vcf/exomes/gnomad.exomes.v4.1.1.sites.chr21.vcf.bgz.tbi",
+      "size": "14109",
+      "md5Hash": "R9hrxiHDPvpIUMI3trBRCA=="
+    },
+    {
+      "name": "release/4.1.1/vcf/genomes/gnomad.genomes.v4.1.1.sites.chr21.vcf.bgz",
+      "size": "7796525262",
+      "md5Hash": "vQiPhuGSSpcCxbpdxeFgUw=="
+    },
+    {
+      "name": "release/4.1.1/vcf/genomes/gnomad.genomes.v4.1.1.sites.chr21.vcf.bgz.tbi",
+      "size": "36762",
+      "md5Hash": "PlhDbTnmRl1Pitw9Pexv+w=="
+    },
+    {
+      "name": "release/4.1.2/",
+      "size": "0",
+      "md5Hash": "1B2M2Y8AsgTpgAmY7PhCfg=="
+    },
+    {
+      "name": "release/4.1.2/constraint/",
+      "size": "0",
+      "md5Hash": "1B2M2Y8AsgTpgAmY7PhCfg=="
+    },
+    {
+      "name": "release/4.1.2/constraint/gnomad.v4.1.2.constraint_metrics.ht/README.txt",
+      "size": "148",
+      "md5Hash": "9pYeYqfKvqXGyE/k2K6BzA=="
+    },
+    {
+      "name": "release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz",
+      "size": "2250319809",
+      "md5Hash": "fKbVGkJCW4V+3bRte8WDLQ=="
+    },
+    {
+      "name": "release/4.1/vcf/genomes/",
+      "size": "0",
+      "md5Hash": "1B2M2Y8AsgTpgAmY7PhCfg=="
+    },
+    {
+      "name": "release/4.1/vcf/genomes/gnomad.genomes.v4.1.sites.chr21.vcf.bgz",
+      "size": "7758981978",
+      "md5Hash": "m2WEz+YvbovQw86pCkzlag=="
+    }
+  ]
+}

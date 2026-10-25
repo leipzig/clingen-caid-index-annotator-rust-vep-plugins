@@ -1,0 +1,124 @@
+// GNOMAD_SITES streams tests/data/gnomad_mini.vcf.bgz through file://: the first 12 records of
+// gnomAD v4.1.1 genomes chr21 (taken 2026-10-24 by an HTTP range request), INFO cut to AC, AN
+// and AF, with four ALTs edited to give a multi-ALT (C>T,G), a '*' in a multi-ALT (C>A,*), a
+// '.' and an N. It is three gzip members, as the real BGZF file is many.
+
+nextflow_process {
+
+    name    "GNOMAD_SITES"
+    script  "modules/sources.nf"
+    process "GNOMAD_SITES"
+    tag     "sources"
+
+    // md5 of tests/data/gnomad_mini.vcf.bgz, base64 as the GCS listing gives it.
+    def miniMd5 = 'zO2HK40pnlXljLOAPSrHzw=='
+
+    test("GNOMAD_SITES splits multi-ALT and skips star") {
+        when {
+            process {
+                """
+                input[0] = ['gnomad_genomes', '21', 'file://${projectDir}/tests/data/gnomad_mini.vcf.bgz', '${miniMd5}']
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (dataset, chrom, sites) = process.out.sites[0]
+            assert [dataset, chrom] == ['gnomad_genomes', '21']
+            assert path(sites).readLines() == [
+                '21\t5029882\tCAA\tC',
+                '21\t5030082\tG\tA',
+                '21\t5030085\tA\tC',
+                '21\t5030088\tC\tT',
+                '21\t5030088\tC\tG',
+                '21\t5030103\tC\tA',
+                '21\t5030105\tC\tA',
+                '21\t5030138\tG\tA',
+                '21\t5030154\tT\tC',
+                '21\t5030179\tC\tA',
+                '21\t5030186\tCACTAAATGAGAACAAAATTTAAG\tC',
+            ]
+            assert path(process.out.skipped[0]).readLines() == [
+                'gnomad_genomes\t21\t5030105\trs1173141359\tC\t*\tstar_allele',
+                'gnomad_genomes\t21\t5030144\t.\tG\t.\tno_alt',
+                'gnomad_genomes\t21\t5030151\trs1601770018\tT\tN\tnon_acgt',
+            ]
+            assert snapshot(process.out).match()
+        }
+    }
+
+    test("GNOMAD_SITES md5 mismatch fails") {
+        when {
+            process {
+                """
+                input[0] = ['gnomad_genomes', '21', 'file://${projectDir}/tests/data/gnomad_mini.vcf.bgz', '1B2M2Y8AsgTpgAmY7PhCfg==']
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains(miniMd5)
+            assert process.errorReport.contains('1B2M2Y8AsgTpgAmY7PhCfg==')
+        }
+    }
+
+    // gnomAD v3.1's chrM file, which MT streams, names its contig chrM: the sites must say MT,
+    // the bare name every per-chromosome file and column uses.
+    test("GNOMAD_SITES writes chrM as MT") {
+        when {
+            def vcf = new File("${outputDir}/gnomad_chrM.vcf.bgz")
+            vcf.parentFile.mkdirs()
+            vcf.withOutputStream { out ->
+                new java.util.zip.GZIPOutputStream(out).withWriter('UTF-8') { w ->
+                    w << '##fileformat=VCFv4.2\n'
+                    w << '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n'
+                    w << 'chrM\t3308\t.\tT\tC\t.\tPASS\t.\n'
+                    w << 'chrM\t3310\t.\tC\tT,*\t.\tPASS\t.\n'
+                }
+            }
+            def md5 = java.security.MessageDigest.getInstance('MD5').digest(vcf.bytes).encodeBase64().toString()
+            process {
+                """
+                input[0] = ['gnomad_genomes', 'MT', 'file://${vcf}', '${md5}']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.sites[0][1] == 'MT'
+            assert path(process.out.sites[0][2]).readLines() == ['MT\t3308\tT\tC', 'MT\t3310\tC\tT']
+            assert path(process.out.skipped[0]).readLines() == ['gnomad_genomes\tMT\t3310\t.\tC\t*\tstar_allele']
+        }
+    }
+
+    test("GNOMAD_SITES fails on a record of another chromosome") {
+        when {
+            process {
+                """
+                input[0] = ['gnomad_genomes', 'X', 'file://${projectDir}/tests/data/gnomad_mini.vcf.bgz', '${miniMd5}']
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('chr21')
+        }
+    }
+
+    test("stub: GNOMAD_SITES") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = ['gnomad_genomes', '21', 'https://stub.invalid/gnomad_genomes/21.vcf.bgz', '${miniMd5}']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.sites[0][0..1] == ['gnomad_genomes', '21']
+            assert path(process.out.sites[0][2]).readLines() == []
+            assert path(process.out.skipped[0]).readLines() == []
+        }
+    }
+}

@@ -1,0 +1,64 @@
+// FETCH_FASTA reads a UCSC hg38 download directory laid out under the test's output directory:
+// bigZips/hg38.fa.gz is tests/data/chrM.fa.gz (the chrM record of UCSC's hg38.fa.gz), and
+// bigZips/md5sum.txt is tests/data/chrM_md5sum.txt (UCSC's md5sum.txt with chrM.fa.gz's md5 on
+// the hg38.fa.gz line, so the stand-in passes the check).
+
+nextflow_process {
+
+    name    "FETCH_FASTA"
+    script  "modules/sources.nf"
+    process "FETCH_FASTA"
+    tag     "sources"
+
+    // Lays out <dir>/bigZips/{hg38.fa.gz,md5sum.txt}; returns <dir> as a file:// URL.
+    def ucscMirror = { String projectDir, String dir, String md5sums ->
+        def bigZips = new File(dir, 'bigZips')
+        bigZips.mkdirs()
+        java.nio.file.Files.copy(
+            new File("${projectDir}/tests/data/chrM.fa.gz").toPath(),
+            new File(bigZips, 'hg38.fa.gz').toPath(),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        new File(bigZips, 'md5sum.txt').text = md5sums
+        return "file://${dir}".toString()
+    }
+
+    test("FETCH_FASTA downloads hg38.fa.gz and checks it against md5sum.txt") {
+        when {
+            params {
+                ucsc_base = ucscMirror(projectDir, "${outputDir}/hg38", new File("${projectDir}/tests/data/chrM_md5sum.txt").text)
+            }
+        }
+        then {
+            assert process.success
+            assert new File(process.out.fasta[0]).name == 'hg38.fa.gz'
+            assert new File(process.out.fasta[0]).bytes == new File("${projectDir}/tests/data/chrM.fa.gz").bytes
+        }
+    }
+
+    test("FETCH_FASTA md5 mismatch fails") {
+        when {
+            params {
+                // the real hg38.fa.gz's md5, which the chrM stand-in does not have
+                ucsc_base = ucscMirror(projectDir, "${outputDir}/hg38", '1c9dcaddfa41027f17cd8f7a82c7293b  hg38.fa.gz\n')
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('1c9dcaddfa41027f17cd8f7a82c7293b')
+            assert process.errorReport.contains('232472e3ea936cf0a3bf8d0d507f7b57')   // chrM.fa.gz's
+        }
+    }
+
+    test("stub: FETCH_FASTA") {
+        options "-stub"
+        when {
+            params {
+                ucsc_base = 'https://stub.invalid/hg38'
+            }
+        }
+        then {
+            assert process.success
+            assert new File(process.out.fasta[0]).name == 'hg38.fa.gz'
+        }
+    }
+}
