@@ -11,13 +11,16 @@ paging through it.
 
 ```
 GET https://reg.genome.network/alleles?refseq=<NC_ accession>&begin=<b>&end=<e>
-    &fields=none+@id+genomicAlleles.hgvs+genomicAlleles.referenceGenome&limit=<L>
+    &fields=none+@id+genomicAlleles.hgvs+genomicAlleles.referenceGenome+genomicAlleles.coordinates&limit=<L>
 ```
 
 It is read-only and needs no login. Each allele comes back with its CA ID and
 its HGVS on every reference it is placed on: the GRCh38 `NC_` accession,
 GenBank `CM…`, GRCh37 `NC_…`. The pipeline keeps only the HGVS on the
-window's own GRCh38 accession, which is the index key.
+window's own GRCh38 accession, which is the index key. The coordinates give,
+for each genome, the allele's bases and the reference's over the same
+stretch (`{"start": 3104, "end": 3106, "allele": "AC", "referenceAllele":
+"AC"}`); they are what tells the reference alleles below apart.
 
 ## What a window returns
 
@@ -29,7 +32,14 @@ window's own GRCh38 accession, which is the index key.
   by a 200 bp flank on each side, and an allele longer than that which
   crosses a window edge is still missed.
 - **Reference alleles too.** About a fifth to a third of what comes back is
-  reference-only (`NC_000021.9:g.5030577G=`). No annotation tool ever looks
+  reference-only (`NC_000021.9:g.5030577G=`). Some are not written `=`: the
+  Registry also holds reference alleles as a `delins` that puts back the very
+  bases it removes. On 2026-10-24 the window NC_012920.1 (3009, 5731] held 13,
+  among them `NC_012920.1:m.3105_3106delinsAC` (`CA2499563283`, where the rCRS
+  reads `AC`) and `m.5131_5133delinsTAA`, mostly at ClinVar indel sites. Only
+  the coordinates give them away, their `allele` equal to their
+  `referenceAllele`, so `enumerate` asks for them and treats such an allele as
+  a reference allele whatever its HGVS. No annotation tool ever looks
   one up, so `enumerate` drops them by default and only counts them
   (`reference=` on stderr). `--keep-reference` writes them as ordinary
   `HGVS<TAB>CAID` rows instead (`written=` then includes them), and the

@@ -6,9 +6,15 @@
 //!   window that `regions` wrote (`GET /alleles?refseq=…&begin=…&end=…`),
 //!   splitting a window whose answer comes back full (below), and writes
 //!   `HGVS<TAB>CAID` for each allele's HGVS on the window's own GRCh38
-//!   accession. Reference alleles (`…=`) are left out unless `--keep-reference`
+//!   accession. Reference alleles are left out unless `--keep-reference`
 //!   is given: they name no change, and no VCF record looks one up, so by
-//!   default they would only fill the index. They are counted either way. The
+//!   default they would only fill the index. They are counted either way.
+//!   Most are written `…=`, but the Registry also holds some as a `delins`
+//!   that puts back the very bases it removes (`NC_012920.1:m.3105_3106delinsAC`
+//!   where the reference is `AC`, 13 of them in chrM 3009-5731 on
+//!   2026-10-24). Only the allele's coordinates give those away, so
+//!   `enumerate` asks for them: an allele whose `allele` equals its
+//!   `referenceAllele` is a reference allele whatever its HGVS says. The
 //!   Registry returns the alleles whose start is greater than `begin` and
 //!   whose end is at most `end`, which is the span `regions` already wrote,
 //!   so the columns go out unchanged.
@@ -95,8 +101,11 @@ const QUOTED_BODY: usize = 200;
 const USER_AGENT: &str = concat!("clingen-index/", env!("CARGO_PKG_VERSION"));
 
 /// The fields `enumerate` asks for. Sent raw: ureq would percent-encode `+`
-/// and `@`, and this literal form is the one known to work.
-const ENUMERATE_FIELDS: &str = "none+@id+genomicAlleles.hgvs+genomicAlleles.referenceGenome";
+/// and `@`, and this literal form is the one known to work. The coordinates
+/// are what tell a reference allele written as a `delins` from a change (see
+/// [`is_reference`]).
+const ENUMERATE_FIELDS: &str =
+    "none+@id+genomicAlleles.hgvs+genomicAlleles.referenceGenome+genomicAlleles.coordinates";
 
 /// The fields `lookup` asks for, as `harvest/query_registry.py` sends them.
 const LOOKUP_FIELDS: &str = "none+@id+genomicAlleles.referenceGenome+genomicAlleles.hgvs";
@@ -118,9 +127,10 @@ enum RegistryCommand {
     /// Asks for each window of the --windows files in turn, splitting a
     /// window whose answer holds --page-size alleles into two overlapping
     /// halves (again and again if need be), and writes `HGVS<TAB>CAID` once
-    /// for every allele with a non-reference HGVS on the window's accession
-    /// (and, with --keep-reference, for every reference one, whose HGVS ends
-    /// in `=`), in the order the Registry gave them. Prints
+    /// for every allele with an HGVS on the window's accession that is not a
+    /// reference allele (and, with --keep-reference, for every reference one:
+    /// its HGVS ends in `=`, or its coordinates' `allele` equals their
+    /// `referenceAllele`), in the order the Registry gave them. Prints
     /// `windows requests splits alleles reference no_grch38_hgvs written` on
     /// stderr; `reference` counts the reference alleles whether or not they
     /// are kept. Exits 2 if a window line is malformed, a request fails, an
@@ -177,9 +187,11 @@ struct EnumerateArgs {
     /// it is more than twice this long.
     #[arg(long, value_name = "N", default_value_t = 1000)]
     split_overlap: u64,
-    /// Write reference alleles (HGVS ending in `=`, e.g. `NC_000021.9:g.5030577G=`)
-    /// too. They name no change, so annotating a VCF never looks one up;
-    /// without this flag they are dropped.
+    /// Write reference alleles too: HGVS ending in `=` (e.g.
+    /// `NC_000021.9:g.5030577G=`), or a `delins` whose bases equal the
+    /// reference's (e.g. `NC_012920.1:m.3105_3106delinsAC`). They name no
+    /// change, so annotating a VCF never looks one up; without this flag they
+    /// are dropped.
     #[arg(long)]
     keep_reference: bool,
     #[command(flatten)]
@@ -235,6 +247,21 @@ struct GenomicAllele {
     /// `GRCh38`, `GRCh37` or `NCBI36`.
     #[serde(rename = "referenceGenome")]
     reference_genome: Option<String>,
+    /// Where it lies on that genome, with its bases and the reference's
+    /// there. Only `enumerate` asks for them.
+    #[serde(default)]
+    coordinates: Vec<Coordinates>,
+}
+
+/// One stretch of a genomic allele, e.g. `{"start": 3104, "end": 3106,
+/// "allele": "AC", "referenceAllele": "AC"}`; the positions are not read.
+#[derive(Deserialize)]
+struct Coordinates {
+    /// The allele's bases; empty for a deletion.
+    allele: Option<String>,
+    /// The reference's bases over the same stretch; empty for an insertion.
+    #[serde(rename = "referenceAllele")]
+    reference_allele: Option<String>,
 }
 
 /// Why one attempt at a request gave no answer.
@@ -595,7 +622,7 @@ struct EnumerateTally {
     /// Distinct alleles of each window: one that two overlapping halves both
     /// returned counts once.
     alleles: u64,
-    /// Alleles whose HGVS on the window's accession ends in `=`, kept or not.
+    /// Reference alleles (see [`is_reference`]), kept or not.
     reference: u64,
     /// Alleles with no HGVS on the window's accession.
     no_grch38_hgvs: u64,
@@ -603,19 +630,40 @@ struct EnumerateTally {
 }
 
 /// The first HGVS of `allele` on `accession` (`NC_000021.9:g.…`), whichever
-/// genomic allele lists it. The GenBank (`CM000683.2:`) and GRCh37
-/// (`NC_000021.8:`) forms of the same allele are other accessions, and no VCF
-/// record on GRCh38 looks them up.
-fn window_hgvs<'a>(allele: &'a Allele, accession: &str) -> Option<&'a str> {
-    allele
-        .genomic_alleles
-        .iter()
-        .flat_map(|g| &g.hgvs)
-        .map(String::as_str)
-        .find(|h| {
-            h.strip_prefix(accession)
-                .is_some_and(|rest| rest.starts_with(':'))
-        })
+/// genomic allele lists it, and that genomic allele. The GenBank
+/// (`CM000683.2:`) and GRCh37 (`NC_000021.8:`) forms of the same allele are
+/// other accessions, and no VCF record on GRCh38 looks them up.
+fn window_hgvs<'a>(allele: &'a Allele, accession: &str) -> Option<(&'a GenomicAllele, &'a str)> {
+    allele.genomic_alleles.iter().find_map(|genomic| {
+        genomic
+            .hgvs
+            .iter()
+            .map(String::as_str)
+            .find(|h| {
+                h.strip_prefix(accession)
+                    .is_some_and(|rest| rest.starts_with(':'))
+            })
+            .map(|h| (genomic, h))
+    })
+}
+
+/// Whether the allele that `genomic` places, `hgvs` on the window's
+/// accession, is a reference allele: it names no change.
+///
+/// The Registry writes most of them `…=`, but some as a `delins` that puts
+/// back the bases it removes (`NC_012920.1:m.3105_3106delinsAC`, where the
+/// reference is `AC`). Nothing in the HGVS says so; the coordinates do, their
+/// `allele` being the same bases as their `referenceAllele`. Left in, such a
+/// key would be a reference call in an index that holds none without
+/// `--keep-reference`, and `reach` could never find it again from a VCF
+/// record (REF equal to ALT names no variant).
+fn is_reference(genomic: &GenomicAllele, hgvs: &str) -> bool {
+    hgvs.ends_with('=')
+        || (!genomic.coordinates.is_empty()
+            && genomic
+                .coordinates
+                .iter()
+                .all(|c| c.allele.is_some() && c.allele == c.reference_allele))
 }
 
 /// The two halves a full span `(begin, end]` is asked for as instead: split
@@ -648,8 +696,8 @@ fn halves(begin: u64, end: u64, overlap: u64) -> Option<((u64, u64), (u64, u64))
 /// its HGVS and CA ID and any other allele by its HGVS (if any) and `@id`,
 /// so the repeat is neither counted nor written again.
 ///
-/// A reference allele (its HGVS ends in `=`) is counted in `tally.reference`
-/// and written like any other row if `keep_reference`, dropped if not.
+/// A reference allele ([`is_reference`]) is counted in `tally.reference` and
+/// written like any other row if `keep_reference`, dropped if not.
 fn enumerate_window(
     client: &Client,
     window: &Window,
@@ -692,8 +740,9 @@ fn enumerate_window(
         let mut rows = String::new();
         for allele in &alleles {
             let id = allele.id.as_deref().unwrap_or_default();
-            let hgvs = window_hgvs(allele, window.accession);
-            let reference = hgvs.is_some_and(|hgvs| hgvs.ends_with('='));
+            let placed = window_hgvs(allele, window.accession);
+            let hgvs = placed.map(|(_, hgvs)| hgvs);
+            let reference = placed.is_some_and(|(genomic, hgvs)| is_reference(genomic, hgvs));
             // Only an allele that is written needs a CA ID.
             let ca = match hgvs {
                 Some(hgvs) if keep_reference || !reference => Some(
@@ -705,7 +754,8 @@ fn enumerate_window(
             };
             // A row's HGVS is never empty, so no row key equals the key of an
             // allele with no HGVS. Nor does it equal that of a reference allele
-            // left out: without --keep-reference a row's HGVS never ends in `=`.
+            // left out, which holds the whole `@id` (`http://…/allele/CA…`)
+            // where a row holds the bare CA ID.
             let key = (
                 hgvs.unwrap_or_default().to_owned(),
                 ca.unwrap_or(id).to_owned(),
@@ -984,10 +1034,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            window_hgvs(&allele, "NC_000021.9"),
+            window_hgvs(&allele, "NC_000021.9").map(|(_, hgvs)| hgvs),
             Some("NC_000021.9:g.5A>G")
         );
-        assert_eq!(window_hgvs(&allele, "NC_000022.11"), None);
+        assert!(window_hgvs(&allele, "NC_000022.11").is_none());
+    }
+
+    #[test]
+    fn reference_alleles_are_told_by_their_hgvs_or_their_coordinates() {
+        // The coordinates of each, as the live Registry gave them for chrM on
+        // 2026-10-24 (NC_012920.1 has AC at 3105-3106 and an N at 3107).
+        let reference = |hgvs: &str, coordinates: &str| {
+            let allele: Allele = serde_json::from_str(&format!(
+                r#"{{"@id": "x", "genomicAlleles": [{{"coordinates": [{coordinates}],
+                    "hgvs": ["{hgvs}", "J01415.2:m.0"], "referenceGenome": "GRCh38"}}]}}"#
+            ))
+            .unwrap();
+            let (genomic, hgvs) = window_hgvs(&allele, "NC_012920.1").unwrap();
+            is_reference(genomic, hgvs)
+        };
+        let at = |allele: &str, reference: &str| {
+            format!(
+                r#"{{"allele": "{allele}", "end": 3106, "referenceAllele": "{reference}", "start": 3104}}"#
+            )
+        };
+        assert!(reference("NC_012920.1:m.3101A=", &at("A", "A")));
+        // A delins that changes nothing: only the coordinates say so.
+        assert!(reference(
+            "NC_012920.1:m.3105_3106delinsAC",
+            &at("AC", "AC")
+        ));
+        // `=` is enough without coordinates (lookup does not ask for them).
+        assert!(reference("NC_012920.1:m.3101A=", ""));
+        assert!(!reference(
+            "NC_012920.1:m.3105_3106delinsTG",
+            &at("TG", "AC")
+        ));
+        assert!(!reference("NC_012920.1:m.3101A>C", &at("C", "A")));
+        // A deletion's allele is empty, an insertion's reference is.
+        assert!(!reference("NC_012920.1:m.3107del", &at("", "N")));
+        assert!(!reference("NC_012920.1:m.3106_3107insA", &at("A", "")));
+        // No coordinates, or none with bases, prove nothing.
+        assert!(!reference("NC_012920.1:m.3105_3106delinsAC", ""));
+        assert!(!reference(
+            "NC_012920.1:m.3105_3106delinsAC",
+            r#"{"start": 3104}"#
+        ));
+        // Every stretch must match.
+        assert!(!reference(
+            "NC_012920.1:m.3105_3106delinsAC",
+            &format!("{},{}", at("AC", "AC"), at("G", "A"))
+        ));
     }
 
     #[test]

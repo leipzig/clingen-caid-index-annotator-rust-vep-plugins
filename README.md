@@ -459,7 +459,11 @@ against the live Registry on 2026-10-24
   alleles;
 - **reference alleles are dropped by default**: about a fifth to a third of
   what a window returns is reference-only (`NC_000021.9:g.5030577G=`), which
-  no annotation tool looks up. `enumerate --keep-reference` writes them too,
+  no annotation tool looks up. A few are written as a `delins` that puts back
+  the reference's own bases (`NC_012920.1:m.3105_3106delinsAC`, 13 of them in
+  chrM 3009-5731); `enumerate` asks for each allele's coordinates and drops
+  those too, as their allele equals the reference allele.
+  `enumerate --keep-reference` writes them all,
   as ordinary `HGVS<TAB>CAID` rows, and the regeneration pipeline's
   `--include_reference` parameter (default `false`) sets that for a whole
   run. The `reference=` count on stderr includes them either way.

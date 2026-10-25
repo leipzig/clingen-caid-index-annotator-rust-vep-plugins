@@ -74,7 +74,9 @@ pipeline (`curl`, `gunzip`, `awk`, `sort`, `gzip`, `openssl`).
 - **`registry`** (always on): `REGIONS` builds the region set and windows;
   `ENUMERATE` runs one batch of windows (one chromosome per batch) and emits
   `HGVS\tCAID` for every non-reference allele (reference alleles, `…=`, only
-  with `--include_reference`; amended 2026-10-24 at the user's request). The windows are queried with
+  with `--include_reference`; amended 2026-10-24 at the user's request; a
+  `delins` whose coordinates' allele equals the reference allele is one too,
+  as the Registry writes some that way). The windows are queried with
   200 bp flanks so alleles crossing a core interval's edge are kept;
   duplicates from overlapping flanks are removed by `KEYS`.
 - **`clinvar`** (default on): genome-wide, as in the ClinVar coverage run:
@@ -135,7 +137,7 @@ with `rustls` for HTTPS, `flate2` for gzip) go into `clingen-index` only.
    writes `windows.tsv` (chrom, query begin, query end, core begin, core end)
    and a summary of bases covered.
 5. **`registry enumerate --windows <TSV> --out <TSV>`** — queries each window
-   (`fields=none+@id+genomicAlleles.hgvs+genomicAlleles.referenceGenome`),
+   (`fields=none+@id+genomicAlleles.hgvs+genomicAlleles.referenceGenome+genomicAlleles.coordinates`),
    asks once per window with a large `limit` and, when an answer is full,
    splits the window into overlapping halves instead of paging with `skip`
    (amended 2026-10-24: `skip` paging loses alleles on the live Registry; see

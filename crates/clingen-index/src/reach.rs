@@ -61,9 +61,12 @@ enum Outcome {
     RefMismatch,
     /// The lookup refused the key's record.
     Unsupported,
-    /// A reference allele (`…=`), which no VCF record names.
+    /// A reference allele (`…=`, or a `delins` whose bases are the
+    /// reference's), which no VCF record names.
     Reference,
-    /// A key [`hgvs_to_vcf`] cannot convert.
+    /// A key [`hgvs_to_vcf`] cannot convert, among them one whose record would
+    /// hold a genome base other than ACGT (the `N` at rCRS 3107), which no
+    /// lookup takes.
     Unparseable,
 }
 

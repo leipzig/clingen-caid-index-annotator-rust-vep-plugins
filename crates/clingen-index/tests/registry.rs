@@ -36,7 +36,8 @@ const PROXY_VARS: [&str; 6] = [
 ];
 
 /// The `fields` parameter of every `enumerate` request, `+` and `@` unencoded.
-const ENUMERATE_FIELDS: &str = "fields=none+@id+genomicAlleles.hgvs+genomicAlleles.referenceGenome";
+const ENUMERATE_FIELDS: &str =
+    "fields=none+@id+genomicAlleles.hgvs+genomicAlleles.referenceGenome+genomicAlleles.coordinates";
 
 fn cli() -> Command {
     let mut cmd = cargo_bin_cmd!("clingen-index");
@@ -483,6 +484,61 @@ fn enumerate_keep_reference_needs_a_ca_id_for_a_reference_allele() {
         "{stderr}"
     );
     s.assert_absent("enum.tsv");
+}
+
+#[test]
+fn enumerate_treats_a_delins_that_changes_nothing_as_a_reference_allele() {
+    // Copied from the live Registry's answer for NC_012920.1 (3100, 3110] on
+    // 2026-10-24: a delins whose coordinates' allele is the reference's (a
+    // reference allele in all but its HGVS), a real substitution, and the
+    // deletion of the N at 3107, which is a change (its allele is empty).
+    let placed = |ca: &str, hgvs: &str, allele: &str, reference: &str| {
+        format!(
+            r#"{{"@id":"http://reg.genome.network/allele/{ca}","genomicAlleles":[{{
+                "coordinates":[{{"allele":"{allele}","end":3106,"referenceAllele":"{reference}","start":3104}}],
+                "hgvs":["NC_012920.1:{hgvs}","J01415.2:{hgvs}"],"referenceGenome":"GRCh38"}}]}}"#
+        )
+    };
+    let answer = || {
+        page(&[
+            placed("CA2499563283", "m.3105_3106delinsAC", "AC", "AC"),
+            placed("CA337096427", "m.3101A>C", "C", "A"),
+            placed("CA337096433", "m.3107del", "", "N"),
+        ])
+    };
+    let s = Scratch::new();
+    let windows = s.windows("w.tsv", &[("MT", "NC_012920.1", 3100, 3110)]);
+
+    let server = FakeRegistry::start(vec![(200, answer())]);
+    let output = s.enumerate(&server, std::slice::from_ref(&windows), &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(
+        s.read("enum.tsv"),
+        "NC_012920.1:m.3101A>C\tCA337096427\nNC_012920.1:m.3107del\tCA337096433\n"
+    );
+    assert!(
+        stderr_of(&output).contains(
+            "windows=1 requests=1 splits=0 alleles=3 reference=1 no_grch38_hgvs=0 written=2"
+        ),
+        "{}",
+        stderr_of(&output)
+    );
+    // The coordinates are asked for.
+    assert!(
+        server.requests()[0].line.contains(ENUMERATE_FIELDS),
+        "{}",
+        server.requests()[0].line
+    );
+
+    let server = FakeRegistry::start(vec![(200, answer())]);
+    let output = s.enumerate(&server, &[windows], &["--keep-reference"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(
+        s.read("enum.tsv"),
+        "NC_012920.1:m.3105_3106delinsAC\tCA2499563283\n\
+         NC_012920.1:m.3101A>C\tCA337096427\n\
+         NC_012920.1:m.3107del\tCA337096433\n"
+    );
 }
 
 #[test]

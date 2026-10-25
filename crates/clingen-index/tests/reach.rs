@@ -198,6 +198,37 @@ fn reference_and_unparseable_are_counted_not_failed() {
 }
 
 #[test]
+fn a_delins_that_changes_nothing_and_a_key_over_n_are_counted_not_failed() {
+    // Both forms the live Registry holds in chrM 3009-5731: a reference
+    // allele written as a delins (33000017-33000018 are CA), and a deletion
+    // whose record would hold an N, which no lookup takes (the tiny genome is
+    // N at chrM 3107, outside its 3200-3300 window, as the rCRS is).
+    let fixture = fixture(
+        &[
+            ("NC_000021.9:g.33000017_33000018delinsCA", 8),
+            ("NC_012920.1:m.3107del", 9),
+        ],
+        false,
+    );
+    let output = reach(&fixture, &[]);
+    let (stdout, stderr) = (stdout_of(&output), stderr_of(&output));
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.starts_with(
+            "keys\t2\nreachable\t0\nwrong_ca\t0\nnot_found\t0\nref_mismatch\t0\n\
+             unsupported\t0\nreference\t1\nunparseable\t1\n"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains(
+            "unparseable: NC_012920.1:m.3107del CA000009 (reference sequence there is not ACGT)"
+        ),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn prefix_limits_the_walk() {
     let fixture = fixture(&EVERY_FORM, false);
     let output = reach(&fixture, &["--prefix", "NC_012920.1:"]);

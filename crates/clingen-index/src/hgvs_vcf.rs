@@ -7,6 +7,16 @@
 //! the nuclear ones and `m.` on `NC_012920.1`. Indels take their anchor base
 //! (and a `dup` its copied bases) from the genome, which is why the
 //! conversion is handed a reader.
+//!
+//! Two kinds of key name nothing a VCF record the adapters key could hold,
+//! and are told apart here rather than left to fail the lookup:
+//!
+//! - a `delins` that puts back the bases it removes, a reference allele the
+//!   Registry holds in that form (`NC_012920.1:m.3105_3106delinsAC` where the
+//!   reference is `AC`): REF would equal ALT, which names no variant;
+//! - a key whose record would hold a genome base other than ACGT, such as the
+//!   `N` the rCRS keeps at 3107 (`NC_012920.1:m.3107del`): `canonical_hgvs`
+//!   takes only ACGT, so no record holding it is ever looked up.
 
 use clingen_allele::resolve_contig;
 
@@ -30,10 +40,12 @@ pub(crate) struct VcfAllele {
 pub(crate) enum Parsed {
     /// A record that names the key's allele.
     Vcf(VcfAllele),
-    /// A reference allele (`…=`): no variant, so no record.
+    /// A reference allele (`…=`, or a `delins` whose bases are the
+    /// reference's): no variant, so no record.
     Reference,
     /// Not a form `canonical_hgvs` writes, or one that needs reference bases
-    /// the genome does not have; the reason says which.
+    /// the genome does not have (off the contig, or not ACGT); the reason
+    /// says which.
     Unparseable(&'static str),
 }
 
@@ -46,6 +58,10 @@ const MAX_SPAN: u64 = 10_000_000;
 
 /// The reason given when the genome has no bases for a span the record needs.
 const NO_REFERENCE: &str = "no reference sequence there";
+
+/// The reason given when the record would hold a genome base other than ACGT,
+/// which `canonical_hgvs` refuses.
+const NOT_ACGT_REFERENCE: &str = "reference sequence there is not ACGT";
 
 /// Convert `hgvs` to a VCF record, reading reference bases with
 /// `ref_seq(chrom, start1, end1)` (1-based, inclusive, uppercase, `None` off
@@ -98,7 +114,12 @@ fn convert(
 
     let chrom = contig.vareffect_name;
     let read = |start1, end1| ref_seq(chrom, start1, end1).ok_or(NO_REFERENCE);
-    let record = |pos1, ref_allele, alt_allele| {
+    let record = |pos1, ref_allele: Vec<u8>, alt_allele: Vec<u8>| {
+        // Only bases read from the genome can fail this: a substitution's
+        // come from the key, checked below.
+        if !is_dna(&ref_allele) || !is_dna(&alt_allele) {
+            return Err(NOT_ACGT_REFERENCE);
+        }
         Ok(Parsed::Vcf(VcfAllele {
             chrom,
             pos1,
@@ -136,7 +157,12 @@ fn convert(
                 if !is_sequence(seq) {
                     return Err("sequence is not ACGT");
                 }
-                record(start, read(start, end)?, seq.into())
+                let reference = read(start, end)?;
+                // The Registry holds some reference alleles in this form.
+                if reference == seq.as_bytes() {
+                    return Ok(Parsed::Reference);
+                }
+                record(start, reference, seq.into())
             } else if let Some(seq) = op.strip_prefix("ins") {
                 // `e - start`, not `start + 1`, which overflows at the last
                 // u64; a range ends after its start, so this cannot underflow.
@@ -187,7 +213,12 @@ fn is_base(text: &str) -> bool {
 
 /// One or more of `A`, `C`, `G`, `T`.
 fn is_sequence(text: &str) -> bool {
-    !text.is_empty() && text.bytes().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T'))
+    is_dna(text.as_bytes())
+}
+
+/// One or more of `A`, `C`, `G`, `T`, the only alleles `canonical_hgvs` takes.
+fn is_dna(bases: &[u8]) -> bool {
+    !bases.is_empty() && bases.iter().all(|b| matches!(b, b'A' | b'C' | b'G' | b'T'))
 }
 
 #[cfg(test)]
@@ -315,6 +346,62 @@ mod tests {
     #[test]
     fn reference_allele_has_no_record() {
         assert_eq!(convert("NC_000021.9:g.5030578="), Parsed::Reference);
+    }
+
+    #[test]
+    fn delins_that_puts_back_the_reference_is_a_reference_allele() {
+        // 33000017-33000018 are CA.
+        assert_eq!(
+            convert("NC_000021.9:g.33000017_33000018delinsCA"),
+            Parsed::Reference
+        );
+        assert_eq!(convert("NC_000021.9:g.33000017delinsC"), Parsed::Reference);
+        // One base different is a change.
+        assert_eq!(
+            convert("NC_000021.9:g.33000017_33000018delinsCG"),
+            vcf("chr21", 33000017, "CA", "CG")
+        );
+    }
+
+    /// The rCRS from 3101 to 3110, ATCTACNTTC, with the `N` it keeps at 3107
+    /// (the bases of tests/data/chrM.fa.gz in the pipeline), and nothing else.
+    fn rcrs_3101_3110(chrom: &str, start1: u64, end1: u64) -> Option<Vec<u8>> {
+        assert_eq!(chrom, "chrM");
+        let start0 = usize::try_from(start1.checked_sub(3101)?).unwrap();
+        let end0 = usize::try_from(end1.checked_sub(3100)?).unwrap();
+        b"ATCTACNTTC".get(start0..end0).map(<[u8]>::to_vec)
+    }
+
+    #[test]
+    fn a_record_holding_a_genome_base_other_than_acgt_is_unparseable() {
+        for hgvs in [
+            "NC_012920.1:m.3107del",
+            "NC_012920.1:m.3105_3108del",
+            "NC_012920.1:m.3107dup",
+            "NC_012920.1:m.3107_3108insA",
+            "NC_012920.1:m.3106_3107delinsAC",
+        ] {
+            assert_eq!(
+                hgvs_to_vcf(hgvs, rcrs_3101_3110),
+                Parsed::Unparseable("reference sequence there is not ACGT"),
+                "{hgvs}"
+            );
+        }
+        // Beside the N, keys convert as ever.
+        assert_eq!(
+            hgvs_to_vcf("NC_012920.1:m.3106del", rcrs_3101_3110),
+            vcf("chrM", 3105, "AC", "A")
+        );
+        assert_eq!(
+            hgvs_to_vcf("NC_012920.1:m.3105_3106delinsAC", rcrs_3101_3110),
+            Parsed::Reference
+        );
+        // A substitution's REF is the key's: an N there is an edit the
+        // conversion does not take, as before.
+        assert_eq!(
+            hgvs_to_vcf("NC_012920.1:m.3107N>A", rcrs_3101_3110),
+            Parsed::Unparseable("unsupported edit")
+        );
     }
 
     #[test]
