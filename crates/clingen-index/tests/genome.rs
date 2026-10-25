@@ -438,3 +438,60 @@ fn genome_with_a_missing_fasta_exits_2() {
     );
     assert_nothing_written(&out);
 }
+
+#[test]
+fn genome_replaces_a_previous_genome_and_its_index() {
+    let (_, chrm) = full_contigs();
+    let tmp = TempDir::new().unwrap();
+    let input = tmp.path().join("chrM.fa");
+    fs::write(&input, fasta(&[("chrM", chrm)])).unwrap();
+    let out = tmp.path().join("genome.bin");
+    fs::write(&out, b"previous genome").unwrap();
+    fs::write(with_suffix(&out, ".idx"), b"previous index").unwrap();
+
+    let output = run_genome(&input, &["--contigs", "MT"], &out);
+    assert!(output.status.success(), "stderr: {}", stderr_of(&output));
+    let reference = reference_genome(tmp.path(), &[("chrM", chrm)]);
+    assert!(
+        read_genome_files(&out) == reference,
+        "the previous genome and index must be replaced by write_genome_binary(chrM)"
+    );
+    assert!(!with_suffix(&out, ".tmp").exists());
+    assert!(!with_suffix(&out, ".idx.tmp").exists());
+}
+
+#[test]
+fn genome_removes_the_old_index_before_the_new_genome_goes_in() {
+    // Replacing a genome takes two renames, and vareffect takes the index as
+    // proof its .bin is complete. The old index is removed first, so a run
+    // that stops before the second rename leaves no index at all, which is
+    // refused, never the old index beside a genome it does not describe. Here
+    // the .bin rename fails (`out` is a directory), after the old index went.
+    let (_, chrm) = full_contigs();
+    let tmp = TempDir::new().unwrap();
+    let input = tmp.path().join("chrM.fa");
+    fs::write(&input, fasta(&[("chrM", chrm)])).unwrap();
+    let out = tmp.path().join("genome.bin");
+    fs::create_dir(&out).unwrap();
+    fs::write(out.join("not-a-genome"), b"x").unwrap();
+    fs::write(with_suffix(&out, ".idx"), b"previous index").unwrap();
+
+    let output = run_genome(&input, &["--contigs", "MT"], &out);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains("renaming"),
+        "stderr: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        !with_suffix(&out, ".idx").exists(),
+        "the old index must be gone before the new genome is renamed into place"
+    );
+    assert!(!with_suffix(&out, ".tmp").exists());
+    assert!(!with_suffix(&out, ".idx.tmp").exists());
+}

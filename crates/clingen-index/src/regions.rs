@@ -19,8 +19,9 @@
 //!    `--merge-gap` bases past the end of the current one, since one request
 //!    for a stretch is cheaper than several for its pieces;
 //! 3. each merged interval of length `L` is cut into `ceil(L / --max-window)`
-//!    windows of near-equal length, its *cores*, so no request grows beyond
-//!    what the Registry answers in one page or two;
+//!    windows of near-equal length, its *cores*, so that one answer of
+//!    `--page-size` alleles seldom fills up (`registry enumerate` never pages:
+//!    it splits a window whose answer is full and asks for each half);
 //! 4. the query span of a window is its core widened by `--flank` on both
 //!    sides, clamped to the contig. The Registry returns only alleles that lie
 //!    wholly inside the span, so the flank is what keeps an allele that starts

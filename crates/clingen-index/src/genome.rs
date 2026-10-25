@@ -14,7 +14,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::BufRead;
+use std::io::{BufRead, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -42,7 +42,8 @@ pub(crate) struct GenomeArgs {
     contigs: Vec<String>,
     /// Genome binary to write; its index goes to `<BIN>.idx`. Both are
     /// written beside it under temporary names and renamed into place only
-    /// once complete, so a failed run leaves any genome already there intact.
+    /// once complete, so a run that fails before then leaves any genome
+    /// already there intact. Replacing one removes its old index first.
     #[arg(long, value_name = "BIN")]
     out: PathBuf,
 }
@@ -201,10 +202,11 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 /// Write `found` as the genome binary `out` and its index `<out>.idx`.
 ///
-/// Both go to `.tmp` names first. The `.bin` is renamed into place before the
-/// `.idx`, because the index is what vareffect takes as proof a `.bin` is
-/// complete; a crash between the two renames leaves a genome with no
-/// matching index, which is refused, not an index describing a missing one.
+/// Both go to `.tmp` names first. Then any old `<out>.idx` is removed, the
+/// `.bin` is renamed into place, and the `.idx` last, because the index is
+/// what vareffect takes as proof a `.bin` is complete: a crash anywhere among
+/// these steps leaves a genome with no index, which is refused, never an
+/// index beside a genome it does not describe (the old one beside the new).
 fn write_output(found: &[Found], out: &Path) -> Result<()> {
     let idx = with_suffix(out, ".idx");
     let tmp_bin = with_suffix(out, ".tmp");
@@ -219,6 +221,12 @@ fn write_output(found: &[Found], out: &Path) -> Result<()> {
         .collect();
     let result = write_genome_binary(&contigs, BUILD, &tmp_bin, &tmp_idx)
         .with_context(|| format!("writing {}", out.display()))
+        .and_then(|()| match fs::remove_file(&idx) {
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                Err(e).with_context(|| format!("removing the old {}", idx.display()))
+            }
+            _ => Ok(()),
+        })
         .and_then(|()| {
             fs::rename(&tmp_bin, out)
                 .with_context(|| format!("renaming {} to {}", tmp_bin.display(), out.display()))
