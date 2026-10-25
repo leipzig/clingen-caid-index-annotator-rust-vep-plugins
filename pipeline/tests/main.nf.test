@@ -181,4 +181,24 @@ nextflow_pipeline {
             assert path("$outputDir/index/caid.fst").exists()
         }
     }
+
+    // gnomAD v4 has no chrM exomes, so MT gets no site list at all: gatherByChrom must still
+    // hand MERGE_SITES an empty list for it, or MT would never reach KEYS and the index.
+    test("stub: a chromosome with no site lists still reaches MERGE_SITES and the index") {
+        when {
+            params {
+                chrom    = "MT"
+                datasets = "gnomad_exomes"
+                outdir   = "$outputDir"
+            }
+        }
+        then {
+            def counts = workflow.trace.tasks().countBy { it.name.tokenize(' ')[0].tokenize(':')[-1] }
+            def expected = (allProcesses - ['GNOMAD_SITES', 'CLINVAR_SITES', 'SPLIT_CACHE']).collectEntries { [it, 1] }
+            assert workflow.success
+            assert counts == expected
+            assert path("$outputDir/harvest/MT.tsv.gz").exists()
+            assert path("$outputDir/index/caid.fst").exists()
+        }
+    }
 }

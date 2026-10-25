@@ -68,7 +68,7 @@ workflow REGENERATE {
     def gnomadRows = channel.value([])
     if ('clinvar' in run.datasets) {
         CLINVAR_SITES(run.clinvar_vcf, run.clinvar_md5, chroms)
-        siteFiles = siteFiles.mix(CLINVAR_SITES.out.sites.flatten().map { f -> [chromOf(f), f] })
+        siteFiles = siteFiles.mix(CLINVAR_SITES.out.sites.flatMap { files -> files.collect { f -> [chromOf(f), f] } })
         skipped = skipped.mix(CLINVAR_SITES.out.skipped)
         provenance = provenance.mix(CLINVAR_SITES.out.date)
     }
@@ -93,7 +93,7 @@ workflow REGENERATE {
     def cached = channel.fromList(chroms).map { c -> [c, []] }
     if (run.cache) {
         SPLIT_CACHE(run.cache, chroms)
-        cached = SPLIT_CACHE.out.cache.flatten().map { f -> [chromOf(f), f] }
+        cached = SPLIT_CACHE.out.cache.flatMap { files -> files.collect { f -> [chromOf(f), f] } }
     }
 
     // Look up what the cache does not answer, in batches, and collect each chromosome's harvest.
@@ -268,13 +268,15 @@ def chromOf(f) {
 
 // Groups [chrom, file] items into [chrom, [sorted files]], given [chrom, n] counts of the
 // files each chromosome expects: a chromosome is emitted as soon as its n files are in, and
-// as [chrom, []] when it expects none.
+// as [chrom, []] when it expects none. groupBy (groupTuple is deprecated since Nextflow 26.04)
+// takes the size from each [key, size, value] tuple, and fails the run when a group ends with
+// fewer or more files than its count, rather than emitting a short list.
 def gatherByChrom(items, counts) {
     def grouped = items
         .combine(counts, by: 0)
-        .map { chrom, f, n -> [groupKey(chrom, n), f] }
-        .groupTuple(sort: true)
-        .map { key, files -> [key.toString(), files] }
+        .map { chrom, f, n -> [chrom, n, f] }
+        .groupBy()
+        .map { chrom, files -> [chrom, files.toSorted()] }
     def none = counts.filter { _chrom, n -> n == 0 }.map { chrom, _n -> [chrom, []] }
     return grouped.mix(none)
 }

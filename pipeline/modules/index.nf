@@ -10,7 +10,9 @@ process SPLIT_CACHE {
     val chroms                           // the run's chromosomes
 
     output:
-    path 'cache_*.tsv', emit: cache      // cache_<chrom>.tsv for every requested chromosome: registered harvest rows
+    // cache_<chrom>.tsv for every requested chromosome: registered harvest rows. Always a list,
+    // even of one file, so the workflow can flatMap it (flatten is deprecated since Nextflow 26.04).
+    path 'cache_*.tsv', arity: '1..*', emit: cache
 
     script:
     """

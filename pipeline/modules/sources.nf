@@ -69,7 +69,9 @@ process CLINVAR_SITES {
     val chroms      // the run's chromosomes
 
     output:
-    path 'sites_*.tsv', emit: sites               // sites_<chrom>.tsv for every requested chromosome: CHROM POS REF ALT
+    // sites_<chrom>.tsv for every requested chromosome: CHROM POS REF ALT. Always a list, even
+    // of one file, so the workflow can flatMap it (flatten is deprecated since Nextflow 26.04).
+    path 'sites_*.tsv', arity: '1..*', emit: sites
     path 'skipped.tsv', emit: skipped             // records that cannot be looked up, with the reason
     path 'clinvar_date.txt', emit: date           // the VCF's ##fileDate, for the manifest's source label
 
