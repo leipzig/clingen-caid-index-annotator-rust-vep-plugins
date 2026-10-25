@@ -33,6 +33,12 @@
                     "default": "clinvar",
                     "pattern": "^(clinvar|gnomad_genomes|gnomad_exomes)(,(clinvar|gnomad_genomes|gnomad_exomes))*$"
                 },
+                "include_reference": {
+                    "type": "boolean",
+                    "description": "Also put the Registry's reference alleles (HGVS ending in =, e.g. NC_000021.9:g.5030577G=) in the index.",
+                    "help_text": "Region enumeration returns them with every window, about a fifth to a third of what comes back. They name no change, so annotating a VCF never looks one up, and by default they are left out.",
+                    "default": false
+                },
                 "gnomad_version": {
                     "type": ["string", "number"],
                     "description": "gnomAD release: latest, or a version such as 4.1.1.",

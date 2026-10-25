@@ -39,6 +39,7 @@ process ENUMERATE {
     input:
     tuple val(chrom), path(windows)   // one windows_<chrom>_<NNNN>.tsv
     val paging                        // [page_size:, split_overlap:]
+    val keep_reference                // true: enumerate --keep-reference (--include_reference)
 
     output:
     tuple val(chrom), path("enum_${windows.baseName.replace('windows_', '')}.tsv"), emit: pairs   // HGVS<TAB>CAID

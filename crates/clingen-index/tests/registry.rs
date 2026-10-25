@@ -408,6 +408,84 @@ fn enumerate_keeps_only_the_windows_grch38_hgvs() {
 }
 
 #[test]
+fn enumerate_keeps_reference_alleles_when_asked() {
+    // The reference allele comes first, as the live Registry returns them
+    // mixed in with the rest. Two runs over the same answer: by default it is
+    // dropped and counted; with `--keep-reference` it is written in its place.
+    let answer = || {
+        page(&[
+            registered(
+                "CA2375273242",
+                &[
+                    (
+                        "GRCh38",
+                        &["NC_000021.9:g.5030577G=", "CM000683.2:g.5030577G="],
+                    ),
+                    ("GRCh37", &["NC_000021.8:g.6403150G="]),
+                ],
+            ),
+            snv("CA1", 5030578),
+        ])
+    };
+    let s = Scratch::new();
+    let windows = s.windows("w.tsv", &[("21", "NC_000021.9", 5030570, 5030590)]);
+
+    let server = FakeRegistry::start(vec![(200, answer())]);
+    let output = s.enumerate(&server, std::slice::from_ref(&windows), &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(s.read("enum.tsv"), "NC_000021.9:g.5030578A>G\tCA1\n");
+    assert!(
+        stderr_of(&output).contains(
+            "windows=1 requests=1 splits=0 alleles=2 reference=1 no_grch38_hgvs=0 written=1"
+        ),
+        "{}",
+        stderr_of(&output)
+    );
+
+    let server = FakeRegistry::start(vec![(200, answer())]);
+    let output = s.enumerate(&server, &[windows], &["--keep-reference"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(
+        s.read("enum.tsv"),
+        "NC_000021.9:g.5030577G=\tCA2375273242\nNC_000021.9:g.5030578A>G\tCA1\n"
+    );
+    // `reference=` counts them either way; only `written=` differs.
+    assert!(
+        stderr_of(&output).contains(
+            "windows=1 requests=1 splits=0 alleles=2 reference=1 no_grch38_hgvs=0 written=2"
+        ),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn enumerate_keep_reference_needs_a_ca_id_for_a_reference_allele() {
+    // A reference allele is written like any other row, so with
+    // `--keep-reference` one without a CA ID stops the run, naming its HGVS.
+    // Without the flag it is dropped before its `@id` is looked at.
+    let answer = || page(&[allele("_:CA", &[("GRCh38", &["NC_000021.9:g.5030577G="])])]);
+    let server = FakeRegistry::start(vec![(200, answer())]);
+    let s = Scratch::new();
+    let windows = s.windows("w.tsv", &[("21", "NC_000021.9", 5030570, 5030590)]);
+    let output = s.enumerate(&server, &[windows], &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(s.read("enum.tsv"), "");
+
+    let server = FakeRegistry::start(vec![(200, answer())]);
+    let s = Scratch::new();
+    let windows = s.windows("w.tsv", &[("21", "NC_000021.9", 5030570, 5030590)]);
+    let output = s.enumerate(&server, &[windows], &["--keep-reference"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("allele NC_000021.9:g.5030577G= has no CA ID"),
+        "{stderr}"
+    );
+    s.assert_absent("enum.tsv");
+}
+
+#[test]
 #[allow(non_snake_case)]
 fn enumerate_keeps_m_hgvs_on_chrM() {
     // Both entries carry the same NC_012920.1 HGVS: one row, not two.

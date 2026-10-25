@@ -30,6 +30,18 @@ nextflow_pipeline {
         }
     }
 
+    test("help lists include_reference") {
+        when {
+            params {
+                help = true
+            }
+        }
+        then {
+            assert workflow.success
+            assert workflow.stdout.join('\n').contains('--include_reference')
+        }
+    }
+
     test("missing chrom fails") {
         when {
             params {
@@ -93,6 +105,50 @@ nextflow_pipeline {
         then {
             assert workflow.failed
             assert (workflow.stdout + workflow.stderr).join('\n').contains('--foo')
+        }
+    }
+
+    // Reference alleles are left out of the index unless asked for. The command line hands
+    // the strict parser a String ('true'), a params file a Boolean; both are accepted.
+    test("include_reference true is accepted") {
+        when {
+            params {
+                chrom             = "21"
+                include_reference = "true"
+                outdir            = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.tasks().any { it.name ==~ /.*ENUMERATE \(windows_21_0000\)/ }
+        }
+    }
+
+    test("include_reference true as a Boolean is accepted") {
+        when {
+            params {
+                chrom             = "21"
+                include_reference = true
+                outdir            = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.success
+            assert workflow.trace.tasks().any { it.name ==~ /.*ENUMERATE \(windows_21_0000\)/ }
+        }
+    }
+
+    test("include_reference maybe fails") {
+        when {
+            params {
+                chrom             = "21"
+                include_reference = "maybe"
+                outdir            = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.failed
+            assert (workflow.stdout + workflow.stderr).join('\n').contains('--include_reference (maybe): Value is [string] but should be [boolean]')
         }
     }
 

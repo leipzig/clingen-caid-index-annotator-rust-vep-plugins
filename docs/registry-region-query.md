@@ -30,7 +30,10 @@ window's own GRCh38 accession, which is the index key.
   crosses a window edge is still missed.
 - **Reference alleles too.** About a fifth to a third of what comes back is
   reference-only (`NC_000021.9:g.5030577G=`). No annotation tool ever looks
-  one up, so `enumerate` drops them.
+  one up, so `enumerate` drops them by default and only counts them
+  (`reference=` on stderr). `--keep-reference` writes them as ordinary
+  `HGVS<TAB>CAID` rows instead (`written=` then includes them), and the
+  pipeline's `--include_reference` sets it for a whole run.
 - **No hidden cap was seen.** A 50 kb window in APP returned all 57,093
   alleles in one request without `limit`, and 59,036 with `limit=200000`.
 

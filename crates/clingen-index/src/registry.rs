@@ -6,10 +6,12 @@
 //!   window that `regions` wrote (`GET /alleles?refseq=…&begin=…&end=…`),
 //!   splitting a window whose answer comes back full (below), and writes
 //!   `HGVS<TAB>CAID` for each allele's HGVS on the window's own GRCh38
-//!   accession. Reference alleles (`…=`) are left out: they name no change,
-//!   and no VCF record looks one up. The Registry returns the alleles whose
-//!   start is greater than `begin` and whose end is at most `end`, which is
-//!   the span `regions` already wrote, so the columns go out unchanged.
+//!   accession. Reference alleles (`…=`) are left out unless `--keep-reference`
+//!   is given: they name no change, and no VCF record looks one up, so by
+//!   default they would only fill the index. They are counted either way. The
+//!   Registry returns the alleles whose start is greater than `begin` and
+//!   whose end is at most `end`, which is the span `regions` already wrote,
+//!   so the columns go out unchanged.
 //! - `lookup` asks about given sites (`POST /alleles?file=vcf`). It is the
 //!   port of `harvest/query_registry.py` and writes the same seven columns,
 //!   `CHROM POS REF ALT CAID HGVS_GRCh38 HGVS_GRCh37`, so its output is a
@@ -116,10 +118,12 @@ enum RegistryCommand {
     /// Asks for each window of the --windows files in turn, splitting a
     /// window whose answer holds --page-size alleles into two overlapping
     /// halves (again and again if need be), and writes `HGVS<TAB>CAID` once
-    /// for every allele with a non-reference HGVS on the window's accession,
-    /// in the order the Registry gave them. Prints
+    /// for every allele with a non-reference HGVS on the window's accession
+    /// (and, with --keep-reference, for every reference one, whose HGVS ends
+    /// in `=`), in the order the Registry gave them. Prints
     /// `windows requests splits alleles reference no_grch38_hgvs written` on
-    /// stderr. Exits 2 if a window line is malformed, a request fails, an
+    /// stderr; `reference` counts the reference alleles whether or not they
+    /// are kept. Exits 2 if a window line is malformed, a request fails, an
     /// allele to be written has no CA ID, or a span too short to split still
     /// holds --page-size alleles; nothing is written then.
     Enumerate(EnumerateArgs),
@@ -173,6 +177,11 @@ struct EnumerateArgs {
     /// it is more than twice this long.
     #[arg(long, value_name = "N", default_value_t = 1000)]
     split_overlap: u64,
+    /// Write reference alleles (HGVS ending in `=`, e.g. `NC_000021.9:g.5030577G=`)
+    /// too. They name no change, so annotating a VCF never looks one up;
+    /// without this flag they are dropped.
+    #[arg(long)]
+    keep_reference: bool,
     #[command(flatten)]
     client: ClientArgs,
 }
@@ -586,7 +595,7 @@ struct EnumerateTally {
     /// Distinct alleles of each window: one that two overlapping halves both
     /// returned counts once.
     alleles: u64,
-    /// Alleles whose HGVS on the window's accession ends in `=`.
+    /// Alleles whose HGVS on the window's accession ends in `=`, kept or not.
     reference: u64,
     /// Alleles with no HGVS on the window's accession.
     no_grch38_hgvs: u64,
@@ -638,11 +647,15 @@ fn halves(begin: u64, end: u64, overlap: u64) -> Option<((u64, u64), (u64, u64))
 /// overlap of two halves comes back in both. `seen` keys each allele, a row by
 /// its HGVS and CA ID and any other allele by its HGVS (if any) and `@id`,
 /// so the repeat is neither counted nor written again.
+///
+/// A reference allele (its HGVS ends in `=`) is counted in `tally.reference`
+/// and written like any other row if `keep_reference`, dropped if not.
 fn enumerate_window(
     client: &Client,
     window: &Window,
     page_size: u64,
     overlap: u64,
+    keep_reference: bool,
     out: &mut AtomicFile,
     tally: &mut EnumerateTally,
 ) -> Result<()> {
@@ -680,16 +693,19 @@ fn enumerate_window(
         for allele in &alleles {
             let id = allele.id.as_deref().unwrap_or_default();
             let hgvs = window_hgvs(allele, window.accession);
+            let reference = hgvs.is_some_and(|hgvs| hgvs.ends_with('='));
+            // Only an allele that is written needs a CA ID.
             let ca = match hgvs {
-                Some(hgvs) if !hgvs.ends_with('=') => Some(
+                Some(hgvs) if keep_reference || !reference => Some(
                     ca_id(id)
                         .with_context(|| format!("allele {hgvs}"))?
                         .ok_or_else(|| anyhow!("allele {hgvs} has no CA ID (@id {id:?})"))?,
                 ),
                 _ => None,
             };
-            // A row's HGVS never ends in `=` and is never empty, so no row key
-            // equals the key of a reference allele or of one with no HGVS.
+            // A row's HGVS is never empty, so no row key equals the key of an
+            // allele with no HGVS. Nor does it equal that of a reference allele
+            // left out: without --keep-reference a row's HGVS never ends in `=`.
             let key = (
                 hgvs.unwrap_or_default().to_owned(),
                 ca.unwrap_or(id).to_owned(),
@@ -698,13 +714,17 @@ fn enumerate_window(
                 continue;
             }
             tally.alleles += 1;
+            if reference {
+                tally.reference += 1;
+            }
             match (hgvs, ca) {
                 (None, _) => tally.no_grch38_hgvs += 1,
-                (Some(_), None) => tally.reference += 1,
                 (Some(hgvs), Some(ca)) => {
                     rows.push_str(&format!("{hgvs}\t{ca}\n"));
                     tally.written += 1;
                 }
+                // A reference allele that is not kept; counted above.
+                (Some(_), None) => {}
             }
         }
         out.write(&rows)?;
@@ -724,6 +744,7 @@ fn enumerate(args: EnumerateArgs) -> Result<ExitCode> {
             window,
             args.page_size,
             args.split_overlap,
+            args.keep_reference,
             &mut out,
             &mut tally,
         )

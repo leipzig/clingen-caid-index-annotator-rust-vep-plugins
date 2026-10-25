@@ -456,7 +456,13 @@ against the live Registry on 2026-10-24
   `enumerate` never pages: it asks for each window once with a large limit
   and, if the answer is full, splits the window into overlapping halves and
   asks again. Fetched both ways, that window now gives the same 40,636
-  alleles.
+  alleles;
+- **reference alleles are dropped by default**: about a fifth to a third of
+  what a window returns is reference-only (`NC_000021.9:g.5030577G=`), which
+  no annotation tool looks up. `enumerate --keep-reference` writes them too,
+  as ordinary `HGVS<TAB>CAID` rows, and the regeneration pipeline's
+  `--include_reference` parameter (default `false`) sets that for a whole
+  run. The `reference=` count on stderr includes them either way.
 
 ## chr21 index
 

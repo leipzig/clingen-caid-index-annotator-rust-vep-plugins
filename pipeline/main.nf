@@ -57,7 +57,11 @@ workflow REGENERATE {
     def windowCounts = REGIONS.out.windows.flatMap { files ->
         chroms.collect { c -> [c, files.count { f -> chromOf(f) == c }] }
     }
-    ENUMERATE(REGIONS.out.windows.flatMap { files -> files.collect { f -> [chromOf(f), f] } }, run.paging)
+    ENUMERATE(
+        REGIONS.out.windows.flatMap { files -> files.collect { f -> [chromOf(f), f] } },
+        run.paging,
+        run.include_reference
+    )
     def enumerated = gatherByChrom(ENUMERATE.out.pairs, windowCounts)
 
     // Sites to look up: one list per dataset and chromosome, merged per chromosome once all
@@ -204,6 +208,7 @@ def settings() {
         ],
         batch_size: wholeNumber('batch_size'),
         datasets: params.datasets.toString().tokenize(',').unique(),
+        include_reference: params.include_reference.toString().toBoolean(),
         gnomad_version: params.gnomad_version.toString(),
         clinvar_vcf: clinvarVcf,
         clinvar_md5: clinvarMd5,
