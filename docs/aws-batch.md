@@ -303,8 +303,9 @@ nextflow run pipeline -profile awsbatch --chrom all --regions pc_exons \
   directory has to be in it.
 - `--chrom all` with `--regions pc_exons` is about 60,328 Registry requests. The
   Registry steps (`ENUMERATE` and `LOOKUP`) run one task at a time each, by
-  design, so the run takes roughly **31 hours** on one stream whatever
-  `MaxvCpus` is. The launcher must stay up that long.
+  design (the two can overlap), so the run takes roughly **31 hours** on the
+  one `ENUMERATE` stream whatever `MaxvCpus` is. The launcher must stay up
+  that long.
 - Run it as often as you like with `-resume`: it is safe on a first run and is
   what continues a stopped one.
 - `nextflow run pipeline --help` lists every parameter.

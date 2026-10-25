@@ -821,15 +821,16 @@ drops the 23 with `ALT=.` before any plugin sees them, as in
 
 `--chrom all --regions pc_exons` is the run the spec plans: 60,328 windows
 over 406.7 Mb of protein-coding exons ±20 bp (430.8 Mb with the flanks), in
-133 batches of up to 500, so at least 60,328 Registry requests on one
-stream. It has not been run. The spec estimates about 31 hours from the cost
-per request; at chr21's measured 1.18 s per request it would be nearer
-20 hours, though chr21 need not be typical. Scaled from chr21 by window
-length, the index would hold about 460 million keys in a `caid.fst` of about
-4.8 GB (the spec estimated 550 million and 6.5 GB). Run it with the SLURM or
-AWS Batch example above, or here with `-profile local --chrom all`; without
-`--genome` it builds the genome. `-resume` continues a stopped run from its
-first unfinished batch, and the launcher has to stay up for the whole run.
+133 batches of up to 500, so at least 60,328 region requests, one after
+another on the single `ENUMERATE` stream. It has not been run. The spec
+estimates about 31 hours from the cost per request; at chr21's measured
+1.18 s per request it would be nearer 20 hours, though chr21 need not be
+typical. Scaled from chr21 by window length, the index would hold about
+460 million keys in a `caid.fst` of about 4.8 GB (the spec estimated
+550 million and 6.5 GB). Run it with the SLURM or AWS Batch example above,
+or here with `-profile local --chrom all`; without `--genome` it builds the
+genome. `-resume` continues a stopped run from its first unfinished batch,
+and the launcher has to stay up for the whole run.
 
 ### Limits
 
@@ -848,12 +849,19 @@ first unfinished batch, and the launcher has to stay up for the whole run.
   put back the reference's own bases, as no VCF record names either;
   `--include_reference` keeps both and adds the manifest source
   `reference_alleles`.
-- **The Registry is read-only to the pipeline and gets one stream.**
-  `ENUMERATE` (region `GET`s) and `LOOKUP` (`POST` lookups) never register
-  anything and run one task at a time each, whatever the executor could run
-  in parallel, so a run's length is set by the Registry, not by the
-  hardware. The Registry is a free public service: contact ClinGen before
-  enumerating more than the protein-coding exons.
+- **The Registry is read-only to the pipeline and gets at most one
+  `ENUMERATE` request stream and one `LOOKUP` stream at a time.** `ENUMERATE`
+  (region `GET`s) and `LOOKUP` (`POST` lookups) never register anything.
+  Each process runs one task at a time (`maxForks 1`), whatever the executor
+  could run in parallel, but they are separate processes and the two can
+  overlap: in the chr21 run's `pipeline_info/trace.txt` the one `LOOKUP`
+  task was submitted at `2026-10-24 22:32:37.634`, while the first
+  `ENUMERATE` batch (submitted `2026-10-24 22:31:35.802`, `8m 24s`) was
+  still running. With gnomAD datasets the `LOOKUP` batches (`--batch_size`,
+  2,000,000 sites by default) are large, so the two streams can overlap for
+  long stretches of a run. A run's length is set by the Registry, not by
+  the hardware. The Registry is a free public service: contact ClinGen
+  before enumerating more than the protein-coding exons.
 - **A `--genome` you supply must be a local or shared absolute path** that
   the `BUILD_INDEX` task can open (the manifest records it, and `build`
   checks it exists), so not an `s3://` URL: on AWS Batch leave it out and let
