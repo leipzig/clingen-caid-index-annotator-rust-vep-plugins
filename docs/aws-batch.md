@@ -43,11 +43,12 @@ the task then has no credentials.
 - AWS CLI v2 and Docker (or another builder that speaks the Docker CLI) on your
   workstation.
 - Subnets with internet egress and a security group for the instances. Tasks call
-  the ClinGen Registry, NCBI, UCSC and (for gnomAD) Google Cloud Storage or the
-  AWS mirror, all over HTTPS. Subnets of your default VPC do: they hand out public
-  IPs, so no NAT gateway is needed, and a security group with no inbound rules is
-  enough. Private subnets work too, behind a NAT gateway, which costs money (see
-  [Costs](#costs)).
+  the ClinGen Registry, NCBI, UCSC and, for gnomAD, Google Cloud Storage (the
+  file listing and md5 sums always come from there) and also the AWS mirror with
+  `--gnomad_mirror aws`, all over HTTPS. Subnets of your default VPC do: they
+  hand out public IPs, so no NAT gateway is needed, and a security group with no
+  inbound rules is enough. Private subnets work too, behind a NAT gateway,
+  which costs money (see [Costs](#costs)).
 - Spot capacity if you use `ComputeType=SPOT`. A new account's quota for Spot
   vCPUs can be small; check Service Quotas if jobs sit in `RUNNABLE`.
 - The region. This guide uses `us-east-1`, because the AWS copy of gnomAD is
@@ -161,7 +162,8 @@ builds are shown but were not run.
 Two notes for building on a Mac with Colima: only `$HOME` is shared with the
 VM, so build from a checkout under `$HOME`; and the build downloads the AWS CLI
 and Debian packages, so it needs the network. The Dockerfile's comments explain
-its choices; `.dockerignore` keeps `data/` and `target/` out of the build.
+its choices; `.dockerignore` lets only what it copies (the Cargo files and
+`crates/`) into the build context, so `data/`, `target/` and run outputs stay out.
 
 ## 3. The launcher
 
@@ -239,8 +241,10 @@ downloads (`nf-schema`, `nf-amazon`) on its first run, so it needs the
 internet too. Reach it with SSH or Session Manager, as you prefer.
 
 Copy the `pipeline/` directory to it (`git clone` if you have pushed the
-repository, otherwise `rsync -a pipeline/ <instance>:pipeline/`), then install
-Java and Nextflow from the repository's pinned environment. The header of
+repository, otherwise
+`rsync -a --exclude .nf-test --exclude work --exclude '.nextflow*' pipeline/ <instance>:pipeline/`,
+which leaves out what local test runs wrote), then install Java and Nextflow
+from the repository's pinned environment. The header of
 `pipeline/environment.yml` explains the micromamba settings, and why Java must
 be put on `PATH` by hand:
 
@@ -252,8 +256,8 @@ export JAVA_HOME="$HOME/clingen-nf/lib/jvm" PATH="$HOME/clingen-nf/bin:$JAVA_HOM
 nextflow -version                       # 26.04.7
 ```
 
-Set `BUCKET`, `QUEUE` and `REPO` on the instance to the values the stack
-printed (the instance has no permission to read the stack), and start the run
+Set `REGION`, `BUCKET`, `QUEUE` and `REPO` on the instance to the values above
+(the instance has no permission to read the stack), and start the run
 inside `tmux` so that it survives a dropped connection:
 
 ```bash
@@ -271,11 +275,15 @@ between sessions, since the launch directory is on its disk.
 leaves nothing for you to keep alive. This guide does not set it up, and it was
 not tested. It would need what the stack does not create: a job role that
 carries the launcher policy, an image that has Java and Nextflow (the task image
-does not), and an on-demand queue (a second stack with `ComputeType=EC2`), so
-that a Spot reclaim cannot end the run. The launch directory of a job is
-discarded when it ends, so `-resume` after a failure needs Nextflow's cloud
-cache (`cloudcache.enabled` and `cloudcache.path` pointing into the bucket);
-check the Nextflow documentation for it before relying on it.
+does not), and an on-demand queue, so that a Spot reclaim cannot end the run.
+A second stack with `ComputeType=EC2` gives one if you also override
+`RepositoryName` and `QueueName`: the defaults (`clingen-index`, `clingen`)
+belong to the first stack, and the deploy fails on them. That stack also
+creates a bucket and a repository of its own, which the head job would not
+use. The launch directory of a job is discarded when it ends, so `-resume`
+after a failure needs Nextflow's cloud cache (`cloudcache.enabled` and
+`cloudcache.path` pointing into the bucket); check the Nextflow documentation
+for it before relying on it.
 
 ## 4. Run
 
@@ -306,9 +314,17 @@ nextflow run pipeline -profile awsbatch --chrom all --regions pc_exons \
   design (the two can overlap), so the run takes roughly **31 hours** on the
   one `ENUMERATE` stream whatever `MaxvCpus` is. The launcher must stay up
   that long.
-- Run it as often as you like with `-resume`: it is safe on a first run and is
-  what continues a stopped one.
-- `nextflow run pipeline --help` lists every parameter.
+- `-resume` continues this regeneration after a stop: Nextflow reuses every
+  task that finished and runs only the rest; it does nothing on a first run.
+  It does not start a new regeneration. Next month, the same command from the
+  same launch directory would reuse the `latest` ClinVar and UCSC downloads
+  and every `ENUMERATE` batch still in `work/`, and publish last month's index
+  again. For a new regeneration (newer ClinVar, gnomAD or UCSC data, alleles
+  registered since), run from a fresh launch directory, or without `-resume`.
+  A new `-work-dir` alone is not enough: `-resume` finds the earlier tasks
+  through `.nextflow/` in the launch directory, wherever their files are.
+- `nextflow run pipeline --help` lists the parameters; `--showHidden` adds the
+  hidden ones (task sizes such as `--page_size`, and the endpoints).
 
 Watch it with `tail -f .nextflow.log` on the launcher, or
 `aws batch list-jobs --region "$REGION" --job-queue "$QUEUE" --job-status RUNNING`.
@@ -320,8 +336,10 @@ profile's default is `us-east-1`.
 ### The genome: leave `--genome` out
 
 Do not pass `--genome` on AWS Batch. A genome you supply must be a local or
-shared absolute path that the `BUILD_INDEX` task can see, and a task on Batch
-sees neither your workstation nor an `s3://` URL. Without it, the `BUILD_GENOME`
+shared path that the `BUILD_INDEX` task can open by the name the launcher gave
+it, and a task on Batch sees neither your workstation nor an `s3://` URL; with an
+`s3://` work directory the run refuses any `--genome` when it starts, rather than
+fail after the whole enumeration. Without it, the `BUILD_GENOME`
 task downloads hg38 from UCSC and builds it, and the run publishes it under
 `<outdir>/genome/`. The manifest in `index/` records it as a path relative to the
 index, so keep `index/` and `genome/` side by side when you move them.
@@ -335,8 +353,9 @@ copy (`gnomad-public-us-east-1`) instead of Google Cloud Storage. In
 `us-east-1` the transfer from S3 to the instance is free (a NAT gateway would still
 charge for the data it processes); from another region it is billed as
 cross-region transfer, so keep the default `gcs` there. The files are fetched
-over HTTPS, so the instance role needs no access to that bucket. The md5 sums
-that are checked still come from Google's object metadata. A full gnomAD genomes
+over HTTPS, so the instance role needs no access to that bucket. The file listing
+and the md5 sums that are checked still come from Google Cloud Storage, so the
+instances must reach it as well as the AWS mirror. A full gnomAD genomes
 run is far larger than the exon run: chr21 alone has 10,958,898 sites in gnomAD
 v4.1, so the whole genome is on the order of hundreds of millions of lookups. The
 cost estimate below does not cover it.
@@ -377,25 +396,34 @@ complete and one after that re-runs what expired, including the Registry steps.
 If you expect a longer gap, raise the parameter by redeploying the stack with
 `WorkExpirationDays=<n>`. Nothing under `results/` expires.
 
-A `-resume` on a later day also changes the manifest: the run date is the day of
-the latest start, so the manifest's `registry_pc_exons_<date>` source and its
-`harvest_date` carry the day of the resume, although the cached `ENUMERATE` tasks
-still hold their older answers. A 31-hour run that is never stopped is dated the
-day it started. The submit times in `pipeline_info/trace.txt` show when each task
-really ran.
+A resumed run's manifest keeps the dates of the answers it reuses: its
+`registry_pc_exons_<date>` source is the UTC day the earliest `ENUMERATE` task ran,
+and its `harvest_date` the UTC day of the earliest `ENUMERATE` or `LOOKUP` task;
+each task records its day, and a task `-resume` reuses keeps it. A 31-hour run
+that crosses midnight UTC keeps the day it began, whether or not it is stopped
+and resumed. The submit times in `pipeline_info/trace.txt` show when each task
+was submitted.
+
+Resuming is for finishing one regeneration. Within the work expiry, a `-resume` from
+the same launch directory also reuses the downloads and the `ENUMERATE` batches of
+the earlier run (see the notes under [4. Run](#4-run)), so start a new regeneration
+from a fresh launch directory, or without `-resume`.
 
 ## Costs
 
 These are estimates, not measurements: nothing here has run on AWS. They are
 for one full `--chrom all --regions pc_exons` run with ClinVar, about 36 hours
-from start to finish, in `us-east-1`, with the approximate on-demand list prices
-I know (they change, so check the AWS pricing pages), and Spot at about a third
-of the on-demand price (Spot prices move).
+from start to finish, in `us-east-1`, with approximate us-east-1 on-demand list
+prices at the time of writing (they change, so check the AWS pricing pages), and
+Spot at about a third of the on-demand price (Spot prices move). Batch places a
+job only on an instance whose memory, less what ECS reserves for itself, covers
+what the job asks: a 4-GiB `ENUMERATE` job does not fit a 4-GiB c6i.large, nor a
+16-GiB sort job a 16-GiB m6i.xlarge.
 
 | Item | Assumption | Estimate |
 |---|---|---|
-| Registry steps | One 2-vCPU, 4-GiB instance (c6i.large, $0.085/h) for 31 h | about $1 on Spot, $2.6 on-demand |
-| Sort and build steps | 4-vCPU, 16-GiB tasks on m6i.xlarge ($0.192/h), 6 h in all (a guess) | about $0.4 on Spot, $1.2 on-demand |
+| Registry steps | One 2-vCPU, 8-GiB instance (m6i.large, $0.096/h) for 31 h, holding the 4-GiB `ENUMERATE` and 2-GiB `LOOKUP` tasks | about $1 on Spot, $3 on-demand |
+| Sort and build steps | 4-vCPU, 16-GiB tasks on r6i.xlarge ($0.252/h) or m6i.2xlarge ($0.384/h), 6 h in all (a guess) | about $0.5 to $0.8 on Spot, $1.5 to $2.3 on-demand |
 | Root volumes | 200 GiB gp3 at $0.08 per GiB-month, up to three instances for 36 h | under $3 |
 | Launcher | t3.medium ($0.0416/h) for 36 h | about $1.5 |
 | NAT gateway | None in public subnets. In private subnets: $0.045/h plus $0.045 per GB processed | about $1.6 plus data |
@@ -403,7 +431,7 @@ of the on-demand price (Spot prices move).
 | ECR | A 0.5-GB image at $0.10 per GB-month | cents |
 | AWS Batch | No charge of its own | none |
 
-On these assumptions a full run comes to something like **$5 to $10**. The
+On these assumptions a full run comes to something like **$5 to $12**. The
 largest unknowns are the sort steps' time and the volume of data in `work/`, and
 a full gnomAD run is a different order of magnitude. Budget alarms are cheap
 insurance; set one before the long run. The 36 hours of launcher, volumes and
@@ -446,20 +474,54 @@ first, then empty both:
 aws s3 sync "s3://$BUCKET/results" results-from-aws           # keep the results
 aws s3 rm "s3://$BUCKET" --recursive
 
-IMAGES=$(aws ecr list-images --region "$REGION" --repository-name clingen-index \
-  --query 'imageIds[*]' --output json)
-[ "$IMAGES" = "[]" ] || aws ecr batch-delete-image --region "$REGION" \
-  --repository-name clingen-index --image-ids "$IMAGES"
+# Every image, untagged ones too: `docker buildx build --push` stores an image index and
+# attestation manifests beside the image. A call takes at most 100 ids, and an index has
+# to go before the images it lists (a pass may print ImageReferencedByManifestList for
+# those, and a later one deletes them), so repeat until the repository is empty.
+REPO_NAME=${REPO#*/}                                          # the stack's RepositoryName
+for pass in 1 2 3 4 5 6 7 8 9 10; do
+  IDS=$(aws ecr list-images --region "$REGION" --repository-name "$REPO_NAME" \
+    --max-items 100 --query 'imageIds' --output json)
+  [ "$IDS" = "[]" ] && break
+  aws ecr batch-delete-image --region "$REGION" --repository-name "$REPO_NAME" \
+    --image-ids "$IDS" --query 'failures[].failureCode' --output text
+done
+aws ecr list-images --region "$REGION" --repository-name "$REPO_NAME" \
+  --query 'length(imageIds)'                                  # expect 0
 
 aws cloudformation delete-stack --region "$REGION" --stack-name "$STACK"
 aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name "$STACK"
 ```
 
-(Use your `RepositoryName` if you changed it.) The stack's queue and compute
-environment go with it, so a run still going when you delete the stack fails.
-Not in the stack, and
-yours to remove: the launcher instance and the `clingen-launcher` role and
-instance profile (`aws iam remove-role-from-instance-profile`,
-`delete-instance-profile`, `delete-role-policy`, `delete-role`), the job
-definitions Nextflow registered (they are inactive and free), and the
-CloudWatch log group `/aws/batch/job`, which keeps the task logs.
+The stack's queue and compute environment go with it, so a run still going when
+you delete the stack fails. Not in the stack, and yours to remove:
+
+- the launcher instance and the `clingen-launcher` role and instance profile
+  (`aws iam remove-role-from-instance-profile`, `delete-instance-profile`,
+  `delete-role-policy`, `delete-role`);
+- the job definitions Nextflow registered, one per image, named `nf-` and the
+  image's name with `.`, `/` and `:` as `-`. They stay `ACTIVE`, though they
+  cost nothing; to remove them:
+
+  ```bash
+  for def in $(aws batch describe-job-definitions --region "$REGION" --status ACTIVE \
+      --query "jobDefinitions[?starts_with(jobDefinitionName, 'nf-') && contains(jobDefinitionName, '${REPO_NAME//\//-}')].jobDefinitionArn" \
+      --output text); do
+    aws batch deregister-job-definition --region "$REGION" --job-definition "$def"
+  done
+  ```
+
+- the task logs, in the CloudWatch log group `/aws/batch/job`. Every Batch job in
+  the account and region logs there by default, so delete the group
+  (`aws logs delete-log-group --region "$REGION" --log-group-name /aws/batch/job`)
+  only if nothing else in this account uses AWS Batch in that region. Otherwise
+  delete this pipeline's log streams, whose names start with its job
+  definitions':
+
+  ```bash
+  for stream in $(aws logs describe-log-streams --region "$REGION" --log-group-name /aws/batch/job \
+      --log-stream-name-prefix nf- \
+      --query "logStreams[?contains(logStreamName, '${REPO_NAME//\//-}')].logStreamName" --output text); do
+    aws logs delete-log-stream --region "$REGION" --log-group-name /aws/batch/job --log-stream-name "$stream"
+  done
+  ```
