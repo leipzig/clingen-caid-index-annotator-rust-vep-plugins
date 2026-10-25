@@ -1,13 +1,14 @@
-// Registry processes: query windows, region enumeration and site lookups.
-// Until their scripts are written, each one refuses a real run; `-stub` runs work.
+// Registry processes: query windows, region enumeration and site lookups. ENUMERATE and LOOKUP
+// are the only processes that talk to the Registry, read-only (GET a region, POST a lookup),
+// one request stream each (maxForks 1).
 
 process REGIONS {
     tag "${chroms.size() == 1 ? chroms[0] : 'all'}"
     label 'small'
 
     input:
-    path inputs      // ncbiRefSeq.txt.gz and knownGene.txt.gz for a named set, or the BED file
-    val chroms       // the run's chromosomes
+    path inputs      // [ncbiRefSeq.txt.gz, knownGene.txt.gz] for a named set, or the BED file
+    val chroms       // the run's chromosomes: one, or all 25
     val windowing    // [set: cds|pc_exons|exons|genes|bed, pad:, merge_gap:, max_window:, flank:, per_task:]
 
     output:
@@ -17,9 +18,15 @@ process REGIONS {
     path 'windows/summary.tsv', emit: summary
 
     script:
+    // settings() gives one chromosome or every primary one, which is what regions' --chrom takes.
+    def chrom = chroms.size() == 1 ? chroms[0] : 'all'
+    def from = windowing.set == 'bed'
+        ? "--bed '${inputs}'"
+        : "--refseq '${inputs[0]}' --gencode '${inputs[1]}' --set ${windowing.set}"
     """
-    echo 'REGIONS has no script yet; run with -stub' >&2
-    exit 1
+    clingen-index regions ${from} \\
+        --pad ${windowing.pad} --merge-gap ${windowing.merge_gap} --max-window ${windowing.max_window} \\
+        --flank ${windowing.flank} --chrom ${chrom} --batch ${windowing.per_task} --out-dir windows
     """
 
     stub:
@@ -45,9 +52,15 @@ process ENUMERATE {
     tuple val(chrom), path("enum_${windows.baseName.replace('windows_', '')}.tsv"), emit: pairs   // HGVS<TAB>CAID
 
     script:
+    // A String 'false' (the command line's, or a params file's) is true in a condition.
+    if (!(keep_reference instanceof Boolean)) {
+        error("ENUMERATE: keep_reference must be a Boolean, not ${keep_reference.getClass().simpleName} '${keep_reference}'")
+    }
+    // enumerate writes <out>.partial and renames it once every window is in.
     """
-    echo 'ENUMERATE has no script yet; run with -stub' >&2
-    exit 1
+    clingen-index registry enumerate --windows ${windows} --out enum_${windows.baseName.replace('windows_', '')}.tsv \\
+        --page-size ${paging.page_size} --split-overlap ${paging.split_overlap}${keep_reference ? ' --keep-reference' : ''} \\
+        --base-url '${params.registry_url}'
     """
 
     stub:
@@ -70,9 +83,10 @@ process LOOKUP {
     tuple val(chrom), path("answers_${batch.baseName.replace('lookup_', '')}.tsv"), emit: answers
 
     script:
+    // lookup writes <out>.partial and renames it once every site is answered.
     """
-    echo 'LOOKUP has no script yet; run with -stub' >&2
-    exit 1
+    clingen-index registry lookup --sites ${batch} --out answers_${batch.baseName.replace('lookup_', '')}.tsv \\
+        --base-url '${params.registry_url}'
     """
 
     stub:

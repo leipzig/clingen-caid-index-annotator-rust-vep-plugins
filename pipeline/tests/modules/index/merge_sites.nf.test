@@ -1,0 +1,89 @@
+// MERGE_SITES on rows of tests/data/harvest_MT.tsv (real ClinVar MT harvest rows): two site
+// lists that overlap, and a cache that answers some of their sites and some others.
+
+nextflow_process {
+
+    name    "MERGE_SITES"
+    script  "modules/index.nf"
+    process "MERGE_SITES"
+    tag     "index"
+
+    test("MERGE_SITES splits cached answers from sites to look up, and batches those") {
+        def harvest
+        when {
+            harvest = path("${projectDir}/tests/data/harvest_MT.tsv").readLines()
+            def site = { String row -> row.split('\t')[0..3].join('\t') }
+            // rows 1-10 and 6-15, one of them twice: 15 distinct sites
+            def clinvar = TestFiles.write("${outputDir}/clinvar.tsv", harvest[0..9].collect(site))
+            def gnomad = TestFiles.write("${outputDir}/gnomad.tsv", (harvest[5..14] + harvest[14..14]).collect(site))
+            // rows 1-4 and 12-13 answer six of them; rows 40-41 answer sites not asked for
+            def cache = TestFiles.write("${outputDir}/cache_MT.tsv", harvest[0..3] + harvest[11..12] + harvest[39..40])
+            process {
+                """
+                input[0] = ['MT', ['clinvar', 'gnomad_genomes'], [file('${clinvar}'), file('${gnomad}')], file('${cache}')]
+                input[1] = 4
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (chrom, cached) = process.out.cached[0]
+            assert chrom == 'MT'
+            assert path(cached).readLines().toSorted() == (harvest[0..3] + harvest[11..12]).toSorted()
+
+            def (batchChrom, batches) = process.out.batches[0]
+            assert batchChrom == 'MT'
+            assert batches.collect { new File(it).name } == ['lookup_MT_0000.tsv', 'lookup_MT_0001.tsv', 'lookup_MT_0002.tsv']
+            assert batches.collect { path(it).readLines().size() } == [4, 4, 1]
+            def toLookUp = (harvest[4..10] + harvest[13..14]).collect { it.split('\t')[0..3].join('\t') }
+            assert batches.collectMany { path(it).readLines() }.toSorted() == toLookUp.toSorted()
+
+            assert path(process.out.counts[0]).readLines() == [
+                'MT\tclinvar\tsites\t10',
+                'MT\tgnomad_genomes\tsites\t11',
+                'MT\tharvest\tsites\t15',
+                'MT\tharvest\tcached\t6',
+                'MT\tharvest\tlooked_up\t9',
+            ]
+        }
+    }
+
+    // gnomAD v4 has no chrM exomes: an MT run with only gnomad_exomes has no site list at all.
+    test("MERGE_SITES with no sites and no cache writes no batch") {
+        when {
+            process {
+                """
+                input[0] = ['MT', [], [], []]
+                input[1] = 4
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert path(process.out.cached[0][1]).readLines() == []
+            assert process.out.batches[0][1] == []
+            assert path(process.out.counts[0]).readLines() == [
+                'MT\tharvest\tsites\t0',
+                'MT\tharvest\tcached\t0',
+                'MT\tharvest\tlooked_up\t0',
+            ]
+        }
+    }
+
+    test("stub: MERGE_SITES") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = ['MT', [], [], []]
+                input[1] = 4
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert new File(process.out.cached[0][1]).name == 'cached_MT.tsv'
+            assert new File(process.out.counts[0]).name == 'counts_MT.tsv'
+        }
+    }
+}

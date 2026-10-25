@@ -1,0 +1,58 @@
+// LOOKUP against MockRegistry (tests/lib), a stand-in for the Registry on 127.0.0.1 that answers
+// from the 60 rows of tests/data/harvest_MT.tsv: real ClinVar MT harvest rows, two of them with
+// their CA ID removed to stand for alleles nobody registered (every ClinVar MT site is registered).
+
+nextflow_process {
+
+    name    "LOOKUP"
+    script  "modules/registry.nf"
+    process "LOOKUP"
+    tag     "registry"
+
+    test("LOOKUP writes the 7 harvest columns for every site") {
+        def registry
+        def picked
+        when {
+            def harvest = TestFiles.rows("${projectDir}/tests/data/harvest_MT.tsv")
+            // Three registered sites and one nobody registered (MT 3310 C>T).
+            picked = harvest.findAll { row -> row[1] in ['3270', '3308', '3310'] }
+            registry = new MockRegistry([], harvest)
+            params {
+                registry_url = registry.url
+            }
+            process {
+                """
+                input[0] = ['MT', file('${TestFiles.write("${outputDir}/lookup_MT_0000.tsv", picked.collect { it[0..3].join('\t') })}')]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (chrom, out) = process.out.answers[0]
+            assert chrom == 'MT'
+            assert new File(out).name == 'answers_MT_0000.tsv'
+            assert TestFiles.rows(out) == picked
+            assert picked.count { row -> row[4] == '' } == 1
+            assert registry.requests.size() == 1
+            assert registry.requests[0].startsWith('POST /alleles?file=vcf&')
+        }
+        cleanup {
+            registry?.close()
+        }
+    }
+
+    test("stub: LOOKUP") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = ['MT', file('${TestFiles.write("${outputDir}/lookup_MT_0000.tsv", ['MT\t3270\tCT\tC'])}')]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert new File(process.out.answers[0][1]).name == 'answers_MT_0000.tsv'
+        }
+    }
+}

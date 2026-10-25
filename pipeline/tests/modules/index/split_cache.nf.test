@@ -1,0 +1,71 @@
+// SPLIT_CACHE on two --cache directories made in the test: harvest chunks (chunk_*.tsv, as the
+// Python harvester and earlier runs wrote them) and a published harvest/ (<chrom>.tsv.gz).
+
+nextflow_process {
+
+    name    "SPLIT_CACHE"
+    script  "modules/index.nf"
+    process "SPLIT_CACHE"
+    tag     "index"
+
+    def chunkRows = [
+        '21\t5030491\tG\tA\tCA749862928\tNC_000021.9:g.5030491G>A\t',
+        'MT\t3270\tCT\tC\tCA2573320431\tNC_012920.1:m.3273del\t',
+        'MT\t3310\tC\tT\t\tNC_012920.1:m.3310C>T\t',                          // nobody registered it
+        'MT\t3307\tA\tN\tERROR:IncorrectReferenceAllele\t\t',                 // the Registry refused it
+    ]
+    def harvestRows = [
+        'MT\t3308\tT\tC\tCA340945\tNC_012920.1:m.3308T>C\t',
+        'X\t100\tA\tG\tCA1\tNC_000023.11:g.100A>G\t',
+    ]
+
+    test("SPLIT_CACHE keeps the registered rows of the run's chromosomes, one file each") {
+        when {
+            process {
+                """
+                input[0] = [file('${TestFiles.write("${outputDir}/chunks/chunk_00000.tsv", chunkRows)}').parent,
+                            file('${TestFiles.write("${outputDir}/harvest/MT.tsv.gz", harvestRows)}').parent]
+                input[1] = ['MT', 'Y']
+                """
+            }
+        }
+        then {
+            assert process.success
+            def files = process.out.cache[0].collectEntries { f -> [new File(f).name, path(f).readLines()] }
+            assert files.keySet() == ['cache_MT.tsv', 'cache_Y.tsv'] as Set
+            assert files['cache_MT.tsv'].toSorted() == [chunkRows[1], harvestRows[0]].toSorted()
+            assert files['cache_Y.tsv'] == []
+        }
+    }
+
+    test("SPLIT_CACHE refuses a line that is not a harvest row") {
+        when {
+            process {
+                """
+                input[0] = [file('${TestFiles.write("${outputDir}/chunks/chunk_00000.tsv", chunkRows + ['MT\t3308\tT\tC\tCA340945'])}').parent]
+                input[1] = ['MT']
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('chunk_00000.tsv line 5 has 5 columns, not the 7 of a harvest row')
+        }
+    }
+
+    test("stub: SPLIT_CACHE") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = [file('${TestFiles.write("${outputDir}/chunks/chunk_00000.tsv", chunkRows)}').parent]
+                input[1] = ['21', 'MT']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.cache[0].collect { new File(it).name } == ['cache_21.tsv', 'cache_MT.tsv']
+        }
+    }
+}

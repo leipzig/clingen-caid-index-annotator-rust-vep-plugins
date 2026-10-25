@@ -1,0 +1,132 @@
+// REACH on an index BUILD_INDEX makes in setup from tests/data/pairs_MT.tsv (58 real MT pairs:
+// substitutions, deletions, a duplication, insertions and delins), with the genome BUILD_GENOME
+// builds from tests/data/chrM.fa.gz.
+
+nextflow_process {
+
+    name    "REACH"
+    script  "modules/index.nf"
+    process "REACH"
+    tag     "index"
+
+    test("BUILD_INDEX then REACH reaches every key") {
+        setup {
+            def shard = TestFiles.write("${outputDir}/shards/NC_012920.1.tsv", path("${projectDir}/tests/data/pairs_MT.tsv").readLines())
+            run("BUILD_GENOME") {
+                script "modules/index.nf"
+                process {
+                    """
+                    input[0] = file('${projectDir}/tests/data/chrM.fa.gz')
+                    input[1] = ['MT']
+                    """
+                }
+            }
+            run("BUILD_INDEX") {
+                script "modules/index.nf"
+                process {
+                    """
+                    input[0] = [file('${shard}')]
+                    input[1] = BUILD_GENOME.out.genome
+                    input[2] = []
+                    input[3] = [set: 'bed', date: '2026-10-24', reference: false, genome: null]
+                    """
+                }
+            }
+        }
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                """
+                input[0] = ['MT', 'NC_012920.1']
+                input[1] = BUILD_INDEX.out.index
+                input[2] = BUILD_GENOME.out.genome
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (chrom, report, status) = process.out.result[0]
+            assert chrom == 'MT'
+            assert status == '0'
+            def lines = path(report).readLines()
+            assert lines[0..2] == ['keys\t58', 'reachable\t58', 'wrong_ca\t0']
+            assert lines.contains('not_found\t0')
+            assert lines.contains('ref_mismatch\t0')
+            assert lines.contains('unsupported\t0')
+            assert path("${outputDir}/results/reports/reach_MT.txt").readLines() == lines
+        }
+    }
+
+    test("REACH reports a key whose REF the genome does not have as status 1, with an example") {
+        setup {
+            // m.3308 is a T on chrM; the shard stays in byte order
+            def pairs = (path("${projectDir}/tests/data/pairs_MT.tsv").readLines() + ['NC_012920.1:m.3308A>G\tCA9000000002']).toSorted()
+            def shard = TestFiles.write("${outputDir}/shards/NC_012920.1.tsv", pairs)
+            run("BUILD_GENOME") {
+                script "modules/index.nf"
+                process {
+                    """
+                    input[0] = file('${projectDir}/tests/data/chrM.fa.gz')
+                    input[1] = ['MT']
+                    """
+                }
+            }
+            run("BUILD_INDEX") {
+                script "modules/index.nf"
+                process {
+                    """
+                    input[0] = [file('${shard}')]
+                    input[1] = BUILD_GENOME.out.genome
+                    input[2] = []
+                    input[3] = [set: 'bed', date: '2026-10-24', reference: false, genome: null]
+                    """
+                }
+            }
+        }
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                """
+                input[0] = ['MT', 'NC_012920.1']
+                input[1] = BUILD_INDEX.out.index
+                input[2] = BUILD_GENOME.out.genome
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (chrom, report, status) = process.out.result[0]
+            assert status == '1'
+            def lines = path(report).readLines()
+            assert lines[0..1] == ['keys\t59', 'reachable\t58']
+            assert lines.contains('ref_mismatch\t1')
+            assert lines.any { it.contains('NC_012920.1:m.3308A>G') }
+        }
+    }
+
+    test("stub: REACH") {
+        options "-stub"
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            def index = new File("${outputDir}/index")
+            index.mkdirs()
+            process {
+                """
+                input[0] = ['MT', 'NC_012920.1']
+                input[1] = file('${index}')
+                input[2] = [file('${projectDir}/tests/data/chrM.fa.gz'), file('${projectDir}/tests/data/chrM_md5sum.txt')]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.result[0][2] == '0'
+        }
+    }
+}

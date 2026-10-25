@@ -1,0 +1,187 @@
+// FINALIZE on a stand-in index and genome made in the test: it publishes them only when every
+// check passed and every chromosome with windows enumerated an allele (Ruling R8), or when
+// allow_mismatches says to anyway.
+
+nextflow_process {
+
+    name    "FINALIZE"
+    script  "modules/index.nf"
+    process "FINALIZE"
+    tag     "index"
+
+    // A KEYS stats file: header and one row.
+    def stats = { String dir, String chrom, int enumFiles, int enumerated ->
+        TestFiles.write("${dir}/keys_${chrom}.tsv", [
+            'chrom\taccession\tenum_files\tenumerated\tharvested\tkeys',
+            "${chrom}\tNC_012920.1\t${enumFiles}\t${enumerated}\t7\t${Math.max(enumerated, 7)}".toString(),
+        ])
+    }
+
+    // The index, genome and REPORT summary FINALIZE stages, as Nextflow code.
+    def inputs = { String dir ->
+        def index = new File("${dir}/index")
+        index.mkdirs()
+        new File(index, 'caid.fst').text = 'fst'
+        new File(index, 'manifest.json').text = '{}'
+        def bin = TestFiles.write("${dir}/genome/GRCh38.bin", ['bin'])
+        def idx = TestFiles.write("${dir}/genome/GRCh38.bin.idx", ['idx'])
+        def summary = TestFiles.write("${dir}/reports/summary.md", ['# summary'])
+        return [index: "file('${index}')", genome: "[file('${bin}'), file('${idx}')]", summary: "file('${summary}')"]
+    }
+
+    test("FINALIZE publishes the index and the built genome when every check passed") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            def staged = inputs("${outputDir}/in")
+            process {
+                """
+                input[0] = ${staged.index}
+                input[1] = ${staged.genome}
+                input[2] = ['reach:MT:0', 'validate:MT:0']
+                input[3] = [file('${stats("${outputDir}/in", 'MT', 1, 58)}')]
+                input[4] = false
+                input[5] = ${staged.summary}
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert path("${outputDir}/results/index/caid.fst").text == 'fst'
+            assert path("${outputDir}/results/index/manifest.json").exists()
+            assert path("${outputDir}/results/genome/GRCh38.bin").exists()
+            assert path("${outputDir}/results/genome/GRCh38.bin.idx").exists()
+        }
+    }
+
+    test("FINALIZE stops on a failing status") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            def staged = inputs("${outputDir}/in")
+            process {
+                """
+                input[0] = ${staged.index}
+                input[1] = []
+                input[2] = ['reach:MT:1', 'validate:MT:0']
+                input[3] = [file('${stats("${outputDir}/in", 'MT', 1, 58)}')]
+                input[4] = false
+                input[5] = ${staged.summary}
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('not publishing index/')
+            assert process.errorReport.contains('reach MT: exit 1')
+            assert !process.errorReport.contains('validate MT')
+            assert !path("${outputDir}/results/index").exists()
+        }
+    }
+
+    // Ruling R8: windows that enumerated nothing look like a Registry answer that changed shape,
+    // which would otherwise leave a ClinVar-only index that passes every check.
+    test("FINALIZE stops on a chromosome whose windows enumerated no allele") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            def staged = inputs("${outputDir}/in")
+            process {
+                """
+                input[0] = ${staged.index}
+                input[1] = []
+                input[2] = ['reach:MT:0', 'validate:MT:0']
+                input[3] = [file('${stats("${outputDir}/in", 'MT', 2, 0)}')]
+                input[4] = false
+                input[5] = ${staged.summary}
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('enumerate MT: 2 windows file(s) gave no allele')
+            assert !path("${outputDir}/results/index").exists()
+        }
+    }
+
+    test("FINALIZE publishes with allow_mismatches") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            def staged = inputs("${outputDir}/in")
+            process {
+                """
+                input[0] = ${staged.index}
+                input[1] = []
+                input[2] = ['reach:MT:1', 'validate:MT:1']
+                input[3] = [file('${stats("${outputDir}/in", 'MT', 2, 0)}')]
+                input[4] = true
+                input[5] = ${staged.summary}
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert path("${outputDir}/results/index/caid.fst").text == 'fst'
+            assert !path("${outputDir}/results/genome").exists()
+            // the task's own stderr, in its work directory
+            def stderr = new File(new File(process.out.index[0]).parentFile, '.command.err').text
+            assert stderr.contains('publishing despite failed checks (--allow_mismatches)')
+            assert stderr.contains('reach MT: exit 1')
+            assert stderr.contains('enumerate MT: 2 windows file(s) gave no allele')
+        }
+    }
+
+    // Under the strict parser the command line's --allow_mismatches false is the String 'false',
+    // which is true in a Groovy condition; main.nf converts it once, and FINALIZE refuses anything else.
+    test("FINALIZE refuses an allow_mismatches that is not a Boolean") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            def staged = inputs("${outputDir}/in")
+            process {
+                """
+                input[0] = ${staged.index}
+                input[1] = []
+                input[2] = ['reach:MT:1']
+                input[3] = [file('${stats("${outputDir}/in", 'MT', 1, 58)}')]
+                input[4] = 'false'
+                input[5] = ${staged.summary}
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).join('\n').contains("allow_mismatches must be a Boolean, not String 'false'")
+        }
+    }
+
+    test("stub: FINALIZE") {
+        options "-stub"
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            def staged = inputs("${outputDir}/in")
+            process {
+                """
+                input[0] = ${staged.index}
+                input[1] = []
+                input[2] = ['reach:MT:1']
+                input[3] = [file('${stats("${outputDir}/in", 'MT', 1, 0)}')]
+                input[4] = false
+                input[5] = ${staged.summary}
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert path("${outputDir}/results/index/caid.fst").exists()
+        }
+    }
+}

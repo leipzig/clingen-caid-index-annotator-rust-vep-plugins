@@ -1,0 +1,4 @@
+# Two chrM intervals more than --merge_gap (5000) apart once padded, so two query windows:
+# the first holds the MT sites of clinvar_mini.vcf.gz, the second insertions and a long deletion.
+chrM	3200	4380
+chrM	9425	9600

@@ -1,0 +1,94 @@
+// VALIDATE on tests/data/harvest_MT.tsv (60 real ClinVar MT harvest rows, two with their CA ID
+// removed to stand for alleles nobody registered: validate compares those too),
+// with the genome built in setup by BUILD_GENOME from tests/data/chrM.fa.gz.
+
+nextflow_process {
+
+    name    "VALIDATE"
+    script  "modules/index.nf"
+    process "VALIDATE"
+    tag     "index"
+
+    setup {
+        run("BUILD_GENOME") {
+            script "modules/index.nf"
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/chrM.fa.gz')
+                input[1] = ['MT']
+                """
+            }
+        }
+    }
+
+    test("VALIDATE strict passes on real MT rows") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            def harvest = TestFiles.write("${outputDir}/MT.tsv.gz", path("${projectDir}/tests/data/harvest_MT.tsv").readLines())
+            process {
+                """
+                input[0] = ['MT', file('${harvest}')]
+                input[1] = BUILD_GENOME.out.genome
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (chrom, report, status) = process.out.result[0]
+            assert chrom == 'MT'
+            assert status == '0'
+            def lines = path(report).readLines()
+            assert lines[0] == 'rows=60 compared=60 skipped=0 malformed=0'
+            assert lines.contains('m\t60\t60\t100.0')
+            assert path("${outputDir}/results/reports/validate_MT.txt").readLines() == lines
+        }
+    }
+
+    test("VALIDATE reports a mismatch as status 1 and lists it") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            // MT 3307 A>T, with the HGVS of another allele
+            def rows = path("${projectDir}/tests/data/harvest_MT.tsv").readLines().collect { row ->
+                row.startsWith('MT\t3307\tA\tT\t') ? row.replace('m.3307A>T', 'm.3307A>G') : row
+            }
+            def harvest = TestFiles.write("${outputDir}/MT.tsv.gz", rows)
+            process {
+                """
+                input[0] = ['MT', file('${harvest}')]
+                input[1] = BUILD_GENOME.out.genome
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (chrom, report, status) = process.out.result[0]
+            assert status == '1'
+            def lines = path(report).readLines()
+            assert lines.contains('m\t60\t59\t98.3')
+            assert lines.any { it.startsWith('MT\t3307\tA\tT\t') && it.contains('NC_012920.1:m.3307A>G') && it.contains('NC_012920.1:m.3307A>T') }
+        }
+    }
+
+    test("stub: VALIDATE") {
+        options "-stub"
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                """
+                input[0] = ['MT', file('${projectDir}/tests/data/harvest_MT.tsv')]
+                input[1] = BUILD_GENOME.out.genome
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.result[0][2] == '0'
+        }
+    }
+}

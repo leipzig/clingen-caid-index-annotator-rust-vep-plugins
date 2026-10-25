@@ -1,0 +1,180 @@
+// REPORT on inputs made in the test as the other processes write them: the validate and reach
+// reports of one chromosome, KEYS' stats, MERGE_SITES' counts, REGIONS' summary, the skipped
+// alleles of ClinVar and gnomAD, and the source records.
+
+nextflow_process {
+
+    name    "REPORT"
+    script  "modules/index.nf"
+    process "REPORT"
+    tag     "index"
+
+    def gnomadUrl = 'https://storage.googleapis.com/gcp-public-data--gnomad/release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz'
+    def skippedRows = [
+        'clinvar\tMT\t1438\t177708\tA\t.\tno_alt',
+        'clinvar\tNT_113889.1\t54175\t2498237\tC\tT\tnon_primary_contig',
+        'gnomad_genomes\tMT\t302\trs1\tA\t*\tstar_allele',
+        'gnomad_genomes\tMT\t310\t.\tT\t*\tstar_allele',
+    ]
+    def sourceRows = [
+        'ucsc_ncbiRefSeq\thttps://x/database/ncbiRefSeq.txt.gz\t100\tWed, 13 Aug 2025 15:30:39 GMT\td41d8cd98f00b204e9800998ecf8427e\tnone published',
+        'ucsc_knownGene\thttps://x/database/knownGene.txt.gz\t200\tWed, 13 Aug 2025 15:31:00 GMT\t0cc175b9c0f1b6a831c399e269772661\tnone published',
+        'clinvar\tclinvar_mini.vcf.gz\t4165\t-\tc9bfa41086774fccb61d11066c3810ea\tchecked',
+    ]
+
+    // Every input file, under dir, as Nextflow code for input[0] to input[5].
+    def inputs = { String dir, int enumerated, int reachable ->
+        def write = { String name, List<String> lines -> "file('${TestFiles.write("${dir}/${name}", lines)}')" }
+        def validate = write('validate_MT.txt', [
+            'rows=7 compared=7 skipped=0 malformed=0', 'class\ttotal\tmatch\tpct',
+            'substitution\t0\t0\t0.0', 'del\t0\t0\t0.0', 'dup\t0\t0\t0.0', 'ins\t0\t0\t0.0', 'delins\t0\t0\t0.0',
+            'm\t7\t7\t100.0', 'other\t0\t0\t0.0',
+        ])
+        def reach = write('reach_MT.txt', [
+            "keys\t${enumerated + 2}", "reachable\t${reachable}", 'wrong_ca\t0', 'not_found\t0',
+            "ref_mismatch\t${enumerated + 2 - reachable}", 'unsupported\t0', 'reference\t0', 'unparseable\t0',
+            'class\tkeys\treachable', 'substitution\t0\t0', 'del\t0\t0', 'dup\t0\t0', 'ins\t0\t0', 'delins\t0\t0',
+            "m\t${enumerated + 2}\t${reachable}", 'other\t0\t0',
+        ]*.toString())
+        def stats = write('keys_MT.tsv', [
+            'chrom\taccession\tenum_files\tenumerated\tharvested\tkeys', "MT\tNC_012920.1\t1\t${enumerated}\t12\t${enumerated + 2}".toString(),
+        ])
+        def skipped = [write('skipped/clinvar.tsv', skippedRows[0..1]), write('skipped/gnomad.tsv', skippedRows[2..3])]
+        def provenance = [
+            write('ucsc_sources.tsv', sourceRows[0..1]),
+            write('clinvar_date.txt', ['2026-10-19']),
+            write('clinvar_sources.tsv', sourceRows[2..2]),
+            write('gnomad_files.tsv', ["gnomad_genomes\tMT\t${gnomadUrl}\t0O8r2IKuRCNol9dDy1Uozw==\t5150029".toString()]),
+        ]
+        def summary = write('summary.tsv', ['chrom\tintervals\tmerged\twindows\tcore_bp\tquery_bp', 'MT\t2\t2\t2\t1435\t2235'])
+        def counts = write('counts_MT.tsv', [
+            'MT\tclinvar\tsites\t7', 'MT\tgnomad_genomes\tsites\t12',
+            'MT\tharvest\tsites\t15', 'MT\tharvest\tcached\t5', 'MT\tharvest\tlooked_up\t10',
+        ])
+        return """
+            input[0] = [${validate}, ${reach}]
+            input[1] = [${stats}]
+            input[2] = [${skipped.join(', ')}]
+            input[3] = [${provenance.join(', ')}]
+            input[4] = ${summary}
+            input[5] = [${counts}]
+            """
+    }
+
+    def info = { boolean allow ->
+        "[date: '2026-10-24', chroms: ['MT'], regions: 'regions_MT.bed', datasets: ['clinvar', 'gnomad_genomes'], " +
+        "windowing: [set: 'bed', pad: 20, merge_gap: 5000, max_window: 50000, flank: 200, per_task: 500], " +
+        "include_reference: false, allow_mismatches: ${allow}]"
+    }
+
+    test("REPORT writes the coverage, sources, skipped alleles and summary") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                inputs("${outputDir}/in", 58, 60) + """
+                input[6] = ['reach:MT:0', 'validate:MT:0']
+                input[7] = ${info(false)}
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert path(process.out.coverage[0]).readLines() == [
+                'chrom\tsource\tmeasure\tvalue',
+                'MT\tregistry\twindows\t2',
+                'MT\tregistry\tcore_bp\t1435',
+                'MT\tregistry\tquery_bp\t2235',
+                'MT\tregistry\talleles\t58',
+                'MT\tclinvar\tsites\t7',
+                'MT\tclinvar\tskipped\t1',
+                'MT\tgnomad_genomes\tsites\t12',
+                'MT\tgnomad_genomes\tskipped\t2',
+                'MT\tharvest\tsites\t15',
+                'MT\tharvest\tcached\t5',
+                'MT\tharvest\tlooked_up\t10',
+                'MT\tharvest\tregistered\t12',
+                'MT\tindex\tkeys\t60',
+            ]
+            assert path(process.out.sources[0]).readLines() == ['source\turl\tsize\tlast_modified\tmd5\tmd5_check'] + sourceRows + [
+                "gnomad_genomes_MT\t${gnomadUrl}\t5150029\t-\t${'0O8r2IKuRCNol9dDy1Uozw=='.decodeBase64().encodeHex()}\tchecked".toString(),
+            ]
+            assert TestFiles.lines(process.out.skipped[0]) == ['dataset\tCHROM\tPOS\tID\tREF\tALT\treason'] + skippedRows
+
+            def summary = path(process.out.summary[0]).text
+            assert summary.contains('Chromosomes: MT')
+            assert summary.contains('Gate: passed')
+            assert summary.contains('| MT | 2 | 58 | 15 | 12 | 60 | 7 of 7 rows match | 60 of 60 keys reachable |')
+            assert summary.contains('| clinvar | no_alt | 1 |')
+            assert summary.contains('| gnomad_genomes | star_allele | 2 |')
+            assert summary.contains('200 bp')
+            // published under --outdir
+            ['coverage.tsv', 'summary.md', 'sources.tsv', 'skipped.tsv.gz'].each {
+                assert path("${outputDir}/results/reports/${it}").exists()
+            }
+        }
+    }
+
+    test("REPORT states a failed gate and what failed") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                inputs("${outputDir}/in", 0, 1) + """
+                input[6] = ['reach:MT:1', 'validate:MT:0']
+                input[7] = ${info(false)}
+                """
+            }
+        }
+        then {
+            assert process.success
+            def summary = path(process.out.summary[0]).text
+            assert summary.contains('Gate: **failed**')
+            assert summary.contains('reach MT: exit 1')
+            assert summary.contains('enumerate MT: 1 windows file(s) gave no allele')
+            assert summary.contains('FINALIZE does not publish index/')
+            assert summary.contains('**1 of 2 keys unreachable**')
+        }
+    }
+
+    test("REPORT says a failed gate publishes anyway with allow_mismatches") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                inputs("${outputDir}/in", 58, 59) + """
+                input[6] = ['reach:MT:1', 'validate:MT:0']
+                input[7] = ${info(true)}
+                """
+            }
+        }
+        then {
+            assert process.success
+            def summary = path(process.out.summary[0]).text
+            assert summary.contains('Gate: **failed**')
+            assert summary.contains('FINALIZE publishes index/ anyway (--allow_mismatches)')
+        }
+    }
+
+    test("stub: REPORT") {
+        options "-stub"
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                inputs("${outputDir}/in", 58, 60) + """
+                input[6] = ['reach:MT:0', 'validate:MT:0']
+                input[7] = ${info(false)}
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert new File(process.out.summary[0]).name == 'summary.md'
+        }
+    }
+}

@@ -1,0 +1,91 @@
+// REGIONS on tests/data: regions_MT.bed (two chrM intervals more than --merge_gap apart) and
+// the UCSC mini tables (MT-ND1 and its neighbours on chrM, SOD1 on chr21).
+
+nextflow_process {
+
+    name    "REGIONS"
+    script  "modules/registry.nf"
+    process "REGIONS"
+    tag     "registry"
+
+    def windowing = { String set -> "[set: '${set}', pad: 20, merge_gap: 5000, max_window: 50000, flank: 200, per_task: 500]" }
+
+    test("REGIONS cuts a BED into windows") {
+        when {
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/regions_MT.bed')
+                input[1] = ['MT']
+                input[2] = ${windowing('bed')}
+                """
+            }
+        }
+        then {
+            assert process.success
+            def windows = process.out.windows[0]
+            assert windows.collect { new File(it).name } == ['windows_MT_0000.tsv']
+            assert path(windows[0]).readLines() == [
+                'MT\tNC_012920.1\t2980\t4600\t3180\t4400',
+                'MT\tNC_012920.1\t9205\t9820\t9405\t9620',
+            ]
+            assert path(process.out.summary[0]).readLines() == [
+                'chrom\tintervals\tmerged\twindows\tcore_bp\tquery_bp',
+                'MT\t2\t2\t2\t1435\t2235',
+            ]
+        }
+    }
+
+    test("REGIONS takes a set from the UCSC tables, one chromosome only") {
+        when {
+            process {
+                """
+                input[0] = [file('${projectDir}/tests/data/ucsc_mini_ncbiRefSeq.txt.gz'), file('${projectDir}/tests/data/ucsc_mini_knownGene.txt.gz')]
+                input[1] = ['MT']
+                input[2] = ${windowing('genes')}
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.windows[0].collect { new File(it).name } == ['windows_MT_0000.tsv']
+            assert path(process.out.windows[0][0]).readLines() == ['MT\tNC_012920.1\t3009\t5731\t3209\t5531']
+        }
+    }
+
+    test("REGIONS for every chromosome writes each one's windows, in batches of per_task") {
+        when {
+            process {
+                """
+                input[0] = [file('${projectDir}/tests/data/ucsc_mini_ncbiRefSeq.txt.gz'), file('${projectDir}/tests/data/ucsc_mini_knownGene.txt.gz')]
+                input[1] = (1..22).collect { n -> n.toString() } + ['X', 'Y', 'MT']
+                input[2] = [set: 'pc_exons', pad: 20, merge_gap: 0, max_window: 50000, flank: 200, per_task: 1]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def names = process.out.windows[0].collect { new File(it).name }
+            // MT-ND1 and MT-ND2 lie further apart than a merge gap of 0: two MT windows, one per file.
+            assert names.findAll { it.startsWith('windows_MT_') } == ['windows_MT_0000.tsv', 'windows_MT_0001.tsv']
+            assert names.any { it.startsWith('windows_21_') }
+            assert names.every { it ==~ /windows_(21|MT)_\d{4}\.tsv/ }
+        }
+    }
+
+    test("stub: REGIONS") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/regions_MT.bed')
+                input[1] = ['21', 'MT']
+                input[2] = ${windowing('bed')}
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.windows[0].collect { new File(it).name } == ['windows_21_0000.tsv', 'windows_MT_0000.tsv']
+        }
+    }
+}

@@ -66,13 +66,14 @@ workflow REGENERATE {
 
     // Sites to look up: one list per dataset and chromosome, merged per chromosome once all
     // of its lists are in (one from ClinVar, one per gnomAD file RESOLVE_GNOMAD lists for it).
+    // Each list travels as [dataset, file], so MERGE_SITES can count each dataset's sites.
     def siteFiles = channel.empty()
     def skipped = channel.empty()
     def provenance = ucscSources
     def gnomadRows = channel.value([])
     if ('clinvar' in run.datasets) {
         CLINVAR_SITES(run.clinvar_vcf, run.clinvar_md5, chroms)
-        siteFiles = siteFiles.mix(CLINVAR_SITES.out.sites.flatMap { files -> files.collect { f -> [chromOf(f), f] } })
+        siteFiles = siteFiles.mix(CLINVAR_SITES.out.sites.flatMap { files -> files.collect { f -> [chromOf(f), ['clinvar', f]] } })
         skipped = skipped.mix(CLINVAR_SITES.out.skipped)
         provenance = provenance.mix(CLINVAR_SITES.out.date, CLINVAR_SITES.out.sources)
     }
@@ -83,7 +84,7 @@ workflow REGENERATE {
             f.readLines().findAll { line -> line }.collect { line -> line.split('\t') as List }
         }
         GNOMAD_SITES(gnomadRows.flatMap { rows -> rows.collect { r -> [r[0], r[1], r[2], r[3]] } })
-        siteFiles = siteFiles.mix(GNOMAD_SITES.out.sites.map { _dataset, chrom, f -> [chrom, f] })
+        siteFiles = siteFiles.mix(GNOMAD_SITES.out.sites.map { dataset, chrom, f -> [chrom, [dataset, f]] })
         skipped = skipped.mix(GNOMAD_SITES.out.skipped)
         provenance = provenance.mix(RESOLVE_GNOMAD.out.files)
     }
@@ -103,7 +104,11 @@ workflow REGENERATE {
     // Look up what the cache does not answer, in batches, and collect each chromosome's harvest.
     // The joins fail rather than drop a chromosome missing on one side, which would leave it
     // out of the index without a word.
-    MERGE_SITES(sites.join(cached, failOnMismatch: true, failOnDuplicate: true), run.batch_size)
+    MERGE_SITES(
+        sites.join(cached, failOnMismatch: true, failOnDuplicate: true)
+            .map { chrom, lists, cache -> [chrom, lists.collect { l -> l[0] }, lists.collect { l -> l[1] }, cache] },
+        run.batch_size
+    )
     LOOKUP(MERGE_SITES.out.batches.flatMap { chrom, files -> files.collect { f -> [chrom, f] } })
     def lookupCounts = MERGE_SITES.out.batches.map { chrom, files -> [chrom, files.size()] }
     def answers = gatherByChrom(LOOKUP.out.answers, lookupCounts)
@@ -122,24 +127,51 @@ workflow REGENERATE {
         genomeToPublish = BUILD_GENOME.out.genome
     }
 
-    // One byte-sorted key shard per chromosome, then the index, then the checks.
+    // One byte-sorted key shard per chromosome, then the index, then the checks. The manifest
+    // records the sources (the region set and run date; the datasets' releases come from the
+    // provenance files) and the genome: a built one relative to the index, a given one by path.
     KEYS(enumerated.join(COLLECT.out.harvest, failOnMismatch: true, failOnDuplicate: true)
         .map { chrom, enums, harvest -> [chrom, accession(chrom), enums, harvest] })
-    BUILD_INDEX(KEYS.out.shard.toSortedList(), genome, provenance.toSortedList())
+    def manifest = [
+        set: run.windowing.set,
+        date: run.date,
+        reference: run.include_reference,
+        genome: run.genome ? run.genome[0].toString() : null,
+    ]
+    BUILD_INDEX(KEYS.out.shard.toSortedList(), genome, provenance.toSortedList(), manifest)
     VALIDATE(COLLECT.out.harvest, genome)
     REACH(channel.fromList(chroms).map { c -> [c, accession(c)] }, BUILD_INDEX.out.index, genome)
 
-    // Publish only if every check passed (or --allow_mismatches); report either way.
+    // Report, then publish only if every check passed (or --allow_mismatches). FINALIZE waits
+    // for REPORT's summary, so a run the gate stops has its reports all the same.
     def statuses = VALIDATE.out.result.map { chrom, _report, status -> "validate:${chrom}:${status}" }
         .mix(REACH.out.result.map { chrom, _report, status -> "reach:${chrom}:${status}" })
         .toSortedList()
-    FINALIZE(BUILD_INDEX.out.index, genomeToPublish, statuses, KEYS.out.stats.toSortedList(), run.allow_mismatches)
     REPORT(
         VALIDATE.out.result.mix(REACH.out.result).map { _chrom, report, _status -> report }.toSortedList(),
         KEYS.out.stats.toSortedList(),
         skipped.toSortedList(),
         provenance.toSortedList(),
-        REGIONS.out.summary
+        REGIONS.out.summary,
+        MERGE_SITES.out.counts.toSortedList(),
+        statuses,
+        [
+            date: run.date,
+            chroms: chroms,
+            regions: run.bed ? run.bed.name : run.windowing.set,
+            windowing: run.windowing,
+            datasets: run.datasets,
+            include_reference: run.include_reference,
+            allow_mismatches: run.allow_mismatches,
+        ]
+    )
+    FINALIZE(
+        BUILD_INDEX.out.index,
+        genomeToPublish,
+        statuses,
+        KEYS.out.stats.toSortedList(),
+        run.allow_mismatches,
+        REPORT.out.summary
     )
 }
 
@@ -193,6 +225,9 @@ def settings() {
 
     return [
         chroms: chromosomes(params.chrom.toString()),
+        // The run date, for the manifest's registry source and harvest date. A -resume on a later
+        // day builds the index again under the new date, though cached tasks are not rerun.
+        date: workflow.start.toLocalDate().toString(),
         bed: bed,
         windowing: [
             set: bed ? 'bed' : regions,
@@ -275,13 +310,14 @@ def chromOf(f) {
 // files each chromosome expects: a chromosome is emitted as soon as its n files are in, and
 // as [chrom, []] when it expects none. groupBy (groupTuple is deprecated since Nextflow 26.04)
 // takes the size from each [key, size, value] tuple, and fails the run when a group ends with
-// fewer or more files than its count, rather than emitting a short list.
+// fewer or more files than its count, rather than emitting a short list. An item may also be
+// [label, file] (the site lists); items sort by their text, the path or label and path.
 def gatherByChrom(items, counts) {
     def grouped = items
         .combine(counts, by: 0)
         .map { chrom, f, n -> [chrom, n, f] }
         .groupBy()
-        .map { chrom, files -> [chrom, files.toSorted()] }
+        .map { chrom, files -> [chrom, files.toSorted { f -> f.toString() }] }
     def none = counts.filter { _chrom, n -> n == 0 }.map { chrom, _n -> [chrom, []] }
     return grouped.mix(none)
 }

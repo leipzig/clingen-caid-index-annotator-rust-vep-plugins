@@ -1,0 +1,153 @@
+// BUILD_INDEX on tests/data/pairs_MT.tsv (58 real MT pairs, byte-sorted) and two real chr21 pairs,
+// with the genome built in setup by BUILD_GENOME from tests/data/chrM.fa.gz, and provenance files
+// like the source processes write.
+
+nextflow_process {
+
+    name    "BUILD_INDEX"
+    script  "modules/index.nf"
+    process "BUILD_INDEX"
+    tag     "index"
+
+    def chr21Pairs = ['NC_000021.9:g.5030491G>A\tCA749862928', 'NC_000021.9:g.5030494T>C\tCA1019381703']
+
+    // What CLINVAR_SITES, FETCH_UCSC and RESOLVE_GNOMAD write; returns their paths as Nextflow code.
+    def provenance = { String dir ->
+        def files = [
+            TestFiles.write("${dir}/clinvar_date.txt", ['2026-10-19']),
+            TestFiles.write("${dir}/clinvar_sources.tsv", ['clinvar\tclinvar.vcf.gz\t200670148\t-\te649bbb1dfe11baafa9feab81a7a7cdd\tchecked']),
+            TestFiles.write("${dir}/ucsc_sources.tsv", ['ucsc_ncbiRefSeq\thttps://x/ncbiRefSeq.txt.gz\t1\t-\td41d8cd98f00b204e9800998ecf8427e\tnone published']),
+            TestFiles.write("${dir}/gnomad_files.tsv", [
+                'gnomad_genomes\t21\thttps://storage.googleapis.com/gcp-public-data--gnomad/release/4.1.1/vcf/genomes/gnomad.genomes.v4.1.1.sites.chr21.vcf.bgz\tvQiPhuGSSpcCxbpdxeFgUw==\t7796525262',
+                'gnomad_exomes\t21\thttps://storage.googleapis.com/gcp-public-data--gnomad/release/4.1.1/vcf/exomes/gnomad.exomes.v4.1.1.sites.chr21.vcf.bgz\t1B2M2Y8AsgTpgAmY7PhCfg==\t1',
+                'gnomad_genomes\tMT\thttps://storage.googleapis.com/gcp-public-data--gnomad/release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz\t0O8r2IKuRCNol9dDy1Uozw==\t5150029',
+            ]),
+        ]
+        return '[' + files.collect { "file('${it}')" }.join(', ') + ']'
+    }
+
+    setup {
+        run("BUILD_GENOME") {
+            script "modules/index.nf"
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/chrM.fa.gz')
+                input[1] = ['MT']
+                """
+            }
+        }
+    }
+
+    test("BUILD_INDEX refuses a locale-sorted shard") {
+        when {
+            // As a UTF-8 locale sorts them, ignoring case: m.3308delinsAC before m.3308T>C.
+            def pairs = path("${projectDir}/tests/data/pairs_MT.tsv").readLines()
+            def localeSorted = pairs.toSorted(String.CASE_INSENSITIVE_ORDER)
+            assert localeSorted != pairs
+            def shard = TestFiles.write("${outputDir}/NC_012920.1.tsv", localeSorted)
+            process {
+                """
+                input[0] = [file('${shard}')]
+                input[1] = BUILD_GENOME.out.genome
+                input[2] = []
+                input[3] = [set: 'bed', date: '2026-10-24', reference: false, genome: null]
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('keys out of order at shards/NC_012920.1.tsv')
+        }
+    }
+
+    test("BUILD_INDEX reads the shards in accession order and records the sources and the built genome") {
+        when {
+            def mt = TestFiles.write("${outputDir}/NC_012920.1.tsv", path("${projectDir}/tests/data/pairs_MT.tsv").readLines())
+            def chr21 = TestFiles.write("${outputDir}/NC_000021.9.tsv", chr21Pairs)
+            process {
+                """
+                input[0] = [file('${mt}'), file('${chr21}')]
+                input[1] = BUILD_GENOME.out.genome
+                input[2] = ${provenance("${outputDir}/provenance")}
+                input[3] = [set: 'pc_exons', date: '2026-10-24', reference: false, genome: null]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def index = process.out.index[0]
+            assert new File("${index}/caid.fst").exists()
+            def manifest = new groovy.json.JsonSlurper().parse(new File("${index}/manifest.json"))
+            assert manifest.sources == [
+                'registry_pc_exons_2026-10-24', 'clinvar_2026-10-19',
+                'gnomad_exomes_v4.1.1', 'gnomad_genomes_v3.1', 'gnomad_genomes_v4.1.1',
+            ]
+            assert manifest.harvest_date == '2026-10-24'
+            assert manifest.entries == 60
+            // relative to the index directory, so FINALIZE's index/ and genome/ move together
+            assert manifest.genome == '../genome/GRCh38.bin'
+        }
+    }
+
+    test("BUILD_INDEX labels reference alleles and records a supplied genome by its own path") {
+        when {
+            def mt = TestFiles.write("${outputDir}/NC_012920.1.tsv", path("${projectDir}/tests/data/pairs_MT.tsv").readLines())
+            process {
+                """
+                input[0] = [file('${mt}')]
+                input[1] = BUILD_GENOME.out.genome
+                input[2] = []
+                input[3] = BUILD_GENOME.out.genome.map { bin, _idx -> [set: 'bed', date: '2026-10-24', reference: true, genome: bin.toString()] }
+                """
+            }
+        }
+        then {
+            assert process.success
+            def index = process.out.index[0]
+            def manifest = new groovy.json.JsonSlurper().parse(new File("${index}/manifest.json"))
+            assert manifest.sources == ['registry_bed_2026-10-24', 'reference_alleles']
+            // the --genome path itself, not the copy staged in BUILD_INDEX's work directory
+            assert manifest.genome.startsWith('/')
+            assert manifest.genome.endsWith('/genome/GRCh38.bin')
+            assert new File(manifest.genome).exists()
+            assert !manifest.genome.startsWith(new File(index).parent)
+        }
+    }
+
+    // The command line and a params file give the strict parser the String 'false', which is
+    // true in a Groovy condition; main.nf converts it once, and BUILD_INDEX refuses anything else.
+    test("BUILD_INDEX refuses a reference flag that is not a Boolean") {
+        when {
+            process {
+                """
+                input[0] = [file('${projectDir}/tests/data/pairs_MT.tsv')]
+                input[1] = BUILD_GENOME.out.genome
+                input[2] = []
+                input[3] = [set: 'bed', date: '2026-10-24', reference: 'false', genome: null]
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).join('\n').contains("reference must be a Boolean, not String 'false'")
+        }
+    }
+
+    test("stub: BUILD_INDEX") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = [file('${projectDir}/tests/data/pairs_MT.tsv')]
+                input[1] = BUILD_GENOME.out.genome
+                input[2] = []
+                input[3] = [set: 'bed', date: '2026-10-24', reference: false, genome: null]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert new File("${process.out.index[0]}/caid.fst").exists()
+        }
+    }
+}

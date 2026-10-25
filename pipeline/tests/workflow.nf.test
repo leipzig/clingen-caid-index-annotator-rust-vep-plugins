@@ -1,0 +1,189 @@
+// The whole workflow, for real and offline: MT over the two windows of tests/data/regions_MT.bed,
+// ClinVar from tests/data/clinvar_mini.vcf.gz (7 MT sites), the genome built from a UCSC mirror
+// laid out under the test's output directory (bigZips/hg38.fa.gz is chrM.fa.gz), and
+// MockRegistry (tests/lib) on 127.0.0.1 standing in for the Registry: it knows the 58 registered
+// alleles of tests/data/pairs_MT.tsv plus one reference allele, and answers lookups from
+// tests/data/harvest_MT.tsv. tests-network/workflow_mt.nf.test runs MT against the real Registry.
+
+nextflow_pipeline {
+
+    name    "pipeline: a real MT run against a stand-in Registry"
+    script  "main.nf"
+    tag     "pipeline"
+
+    // A made-up CA ID: reach counts reference keys without looking them up.
+    def reference = ['NC_012920.1:m.3307A=', 'CA9000000001']
+    def today = java.time.LocalDate.now().toString()
+
+    // The registry and its alleles; withAlleles false gives a Registry whose region query finds nothing.
+    def startRegistry = { String projectDir, boolean withAlleles ->
+        def pairs = withAlleles ? TestFiles.rows("${projectDir}/tests/data/pairs_MT.tsv") + [reference] : []
+        new MockRegistry(pairs, TestFiles.rows("${projectDir}/tests/data/harvest_MT.tsv"))
+    }
+
+    // The script of each ENUMERATE task, from the work directories.
+    def enumerateCommands = { String workDir ->
+        def commands = []
+        new File(workDir).eachFileRecurse { f ->
+            if (f.name == '.command.sh' && f.text.contains('clingen-index registry enumerate')) {
+                commands << f.text
+            }
+        }
+        commands
+    }
+
+    def reachCounts = { String file ->
+        path(file).readLines().takeWhile { !it.startsWith('class\t') }.collectEntries { it.split('\t') as List }
+    }
+
+    // The command line and a params file give the strict parser Strings: 'false' must stay false.
+    test("MT run publishes an index of the enumerated and harvested alleles, without reference alleles") {
+        def registry
+        when {
+            registry = startRegistry(projectDir, true)
+            params {
+                chrom             = "MT"
+                regions           = "${projectDir}/tests/data/regions_MT.bed"
+                clinvar_vcf       = "${projectDir}/tests/data/clinvar_mini.vcf.gz"
+                include_reference = "false"
+                allow_mismatches  = "false"
+                registry_url      = registry.url
+                ucsc_base         = TestFiles.ucscMirror(projectDir, "${outputDir}/ucsc")
+                outdir            = "${outputDir}/results"
+            }
+        }
+        then {
+            assert workflow.success
+            def results = "${outputDir}/results"
+
+            // two windows: one GET each; the 7 ClinVar MT sites: one POST
+            assert registry.requests.count { it.startsWith('GET /alleles?refseq=NC_012920.1&') } == 2
+            assert registry.requests.count { it.startsWith('POST /alleles?file=vcf&') } == 1
+            def commands = enumerateCommands("${launchDir}/work")
+            assert commands.size() == 1
+            assert !commands[0].contains('--keep-reference')
+
+            def manifest = new groovy.json.JsonSlurper().parse(new File("${results}/index/manifest.json"))
+            assert manifest.sources == ["registry_bed_${today}".toString(), 'clinvar_2026-10-19']
+            assert manifest.harvest_date == today
+            assert manifest.genome == '../genome/GRCh38.bin'
+            assert manifest.entries == 58
+            assert path("${results}/index/caid.fst").exists()
+            assert path("${results}/genome/GRCh38.bin").exists()
+            assert path("${results}/genome/GRCh38.bin.idx").exists()
+
+            assert TestFiles.lines("${results}/harvest/MT.tsv.gz").size() == 7
+            assert reachCounts("${results}/reports/reach_MT.txt") == [
+                keys: '58', reachable: '58', wrong_ca: '0', not_found: '0', ref_mismatch: '0',
+                unsupported: '0', reference: '0', unparseable: '0',
+            ]
+            assert path("${results}/reports/validate_MT.txt").readLines().contains('m\t7\t7\t100.0')
+            def coverage = path("${results}/reports/coverage.tsv").readLines()
+            assert coverage.contains('MT\tregistry\twindows\t2')
+            assert coverage.contains('MT\tregistry\talleles\t58')
+            assert coverage.contains('MT\tclinvar\tsites\t7')
+            assert coverage.contains('MT\tclinvar\tskipped\t1')
+            assert coverage.contains('MT\tindex\tkeys\t58')
+            assert path("${results}/reports/summary.md").text.contains('Gate: passed')
+            assert path("${results}/reports/sources.tsv").readLines().any { it.startsWith('clinvar\t') }
+            assert TestFiles.lines("${results}/reports/skipped.tsv.gz") == [
+                'dataset\tCHROM\tPOS\tID\tREF\tALT\treason', 'clinvar\tMT\t1438\t177708\tA\t.\tno_alt',
+            ]
+        }
+        cleanup {
+            registry?.close()
+        }
+    }
+
+    test("MT run with include_reference keeps the reference alleles and says so in the manifest") {
+        def registry
+        when {
+            registry = startRegistry(projectDir, true)
+            params {
+                chrom             = "MT"
+                regions           = "${projectDir}/tests/data/regions_MT.bed"
+                clinvar_vcf       = "${projectDir}/tests/data/clinvar_mini.vcf.gz"
+                include_reference = "true"
+                registry_url      = registry.url
+                ucsc_base         = TestFiles.ucscMirror(projectDir, "${outputDir}/ucsc")
+                outdir            = "${outputDir}/results"
+            }
+        }
+        then {
+            assert workflow.success
+            def results = "${outputDir}/results"
+            def manifest = new groovy.json.JsonSlurper().parse(new File("${results}/index/manifest.json"))
+            assert manifest.sources == ["registry_bed_${today}".toString(), 'reference_alleles', 'clinvar_2026-10-19']
+            assert manifest.entries == 59
+            def commands = enumerateCommands("${launchDir}/work")
+            assert commands.size() == 1
+            assert commands[0].contains('--keep-reference')
+            def reach = reachCounts("${results}/reports/reach_MT.txt")
+            assert reach.keys == '59'
+            assert reach.reachable == '58'
+            assert reach.reference == '1'
+            assert path("${results}/reports/summary.md").text.contains('Gate: passed')
+        }
+        cleanup {
+            registry?.close()
+        }
+    }
+
+    // Ruling R8: windows that enumerate nothing look like a Registry answer that changed shape.
+    // FINALIZE refuses to publish; REPORT has run first, so the reports say why.
+    test("MT run whose windows enumerate nothing fails before publishing, and still reports") {
+        def registry
+        when {
+            registry = startRegistry(projectDir, false)
+            params {
+                chrom            = "MT"
+                regions          = "${projectDir}/tests/data/regions_MT.bed"
+                clinvar_vcf      = "${projectDir}/tests/data/clinvar_mini.vcf.gz"
+                allow_mismatches = "false"
+                registry_url     = registry.url
+                ucsc_base        = TestFiles.ucscMirror(projectDir, "${outputDir}/ucsc")
+                outdir           = "${outputDir}/results"
+            }
+        }
+        then {
+            def results = "${outputDir}/results"
+            assert workflow.failed
+            assert (workflow.stdout + workflow.stderr).join('\n').contains('enumerate MT: 1 windows file(s) gave no allele')
+            assert !path("${results}/index").exists()
+            assert !path("${results}/genome").exists()
+            def summary = path("${results}/reports/summary.md").text
+            assert summary.contains('Gate: **failed**')
+            assert summary.contains('enumerate MT: 1 windows file(s) gave no allele')
+            assert path("${results}/reports/coverage.tsv").readLines().contains('MT\tregistry\talleles\t0')
+        }
+        cleanup {
+            registry?.close()
+        }
+    }
+
+    test("MT run whose windows enumerate nothing publishes with allow_mismatches") {
+        def registry
+        when {
+            registry = startRegistry(projectDir, false)
+            params {
+                chrom            = "MT"
+                regions          = "${projectDir}/tests/data/regions_MT.bed"
+                clinvar_vcf      = "${projectDir}/tests/data/clinvar_mini.vcf.gz"
+                allow_mismatches = "true"
+                registry_url     = registry.url
+                ucsc_base        = TestFiles.ucscMirror(projectDir, "${outputDir}/ucsc")
+                outdir           = "${outputDir}/results"
+            }
+        }
+        then {
+            def results = "${outputDir}/results"
+            assert workflow.success
+            // the 7 harvested ClinVar alleles only
+            assert new groovy.json.JsonSlurper().parse(new File("${results}/index/manifest.json")).entries == 7
+            assert path("${results}/reports/summary.md").text.contains('FINALIZE publishes index/ anyway (--allow_mismatches)')
+        }
+        cleanup {
+            registry?.close()
+        }
+    }
+}

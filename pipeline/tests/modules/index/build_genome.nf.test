@@ -1,0 +1,59 @@
+// BUILD_GENOME on tests/data/chrM.fa.gz, the chrM record of UCSC's hg38.fa.gz.
+
+nextflow_process {
+
+    name    "BUILD_GENOME"
+    script  "modules/index.nf"
+    process "BUILD_GENOME"
+    tag     "index"
+
+    test("BUILD_GENOME writes the run's chromosomes as a vareffect genome") {
+        when {
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/chrM.fa.gz')
+                input[1] = ['MT']
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (bin, idx) = process.out.genome[0]
+            assert bin.endsWith('genome/GRCh38.bin')
+            assert idx.endsWith('genome/GRCh38.bin.idx')
+            assert new File(bin).length() >= 16569   // chrM's bases
+            assert new File(idx).length() > 0
+        }
+    }
+
+    test("BUILD_GENOME fails on a chromosome the FASTA lacks") {
+        when {
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/chrM.fa.gz')
+                input[1] = ['21', 'MT']
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert process.errorReport.contains('21')
+        }
+    }
+
+    test("stub: BUILD_GENOME") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = file('${projectDir}/tests/data/chrM.fa.gz')
+                input[1] = ['MT']
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.genome[0][0].endsWith('genome/GRCh38.bin')
+        }
+    }
+}

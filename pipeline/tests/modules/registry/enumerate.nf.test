@@ -1,0 +1,116 @@
+// ENUMERATE against MockRegistry (tests/lib), a stand-in for the Registry on 127.0.0.1 that
+// knows the 58 registered alleles of tests/data/pairs_MT.tsv (real ClinVar MT alleles in the two
+// windows of regions_MT.bed) and one reference allele.
+
+nextflow_process {
+
+    name    "ENUMERATE"
+    script  "modules/registry.nf"
+    process "ENUMERATE"
+    tag     "registry"
+
+    def pairs = { String projectDir -> TestFiles.rows("${projectDir}/tests/data/pairs_MT.tsv") }
+    // A made-up CA ID: reach counts reference keys without looking them up.
+    def reference = ['NC_012920.1:m.3307A=', 'CA9000000001']
+
+    // The windows of regions_MT.bed, as REGIONS writes them.
+    def windows = { String dir ->
+        TestFiles.write("${dir}/windows_MT_0000.tsv", [
+            'MT\tNC_012920.1\t2980\t4600\t3180\t4400',
+            'MT\tNC_012920.1\t9205\t9820\t9405\t9620',
+        ])
+    }
+
+    test("ENUMERATE writes every non-reference allele of its windows, one request each") {
+        def registry
+        when {
+            registry = new MockRegistry(pairs(projectDir) + [reference], [])
+            params {
+                registry_url = registry.url
+            }
+            process {
+                """
+                input[0] = ['MT', file('${windows(outputDir)}')]
+                input[1] = [page_size: 200000, split_overlap: 1000]
+                input[2] = false
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (chrom, out) = process.out.pairs[0]
+            assert chrom == 'MT'
+            assert new File(out).name == 'enum_MT_0000.tsv'
+            // Written in the Registry's order; KEYS sorts.
+            assert path(out).readLines().toSorted() == path("${projectDir}/tests/data/pairs_MT.tsv").readLines().toSorted()
+            assert registry.requests.size() == 2
+            assert registry.requests[0].startsWith('GET /alleles?refseq=NC_012920.1&begin=2980&end=4600&')
+            assert registry.requests[0].contains('limit=200000')
+            assert registry.requests[1].startsWith('GET /alleles?refseq=NC_012920.1&begin=9205&end=9820&')
+        }
+        cleanup {
+            registry?.close()
+        }
+    }
+
+    test("ENUMERATE with keep_reference keeps reference alleles") {
+        def registry
+        when {
+            registry = new MockRegistry(pairs(projectDir) + [reference], [])
+            params {
+                registry_url = registry.url
+            }
+            process {
+                """
+                input[0] = ['MT', file('${windows(outputDir)}')]
+                input[1] = [page_size: 200000, split_overlap: 1000]
+                input[2] = true
+                """
+            }
+        }
+        then {
+            assert process.success
+            def lines = path(process.out.pairs[0][1]).readLines()
+            assert lines.size() == 59
+            assert lines.contains(reference.join('\t'))
+        }
+        cleanup {
+            registry?.close()
+        }
+    }
+
+    // The command line and a params file give the strict parser the String 'false', which is
+    // true in a Groovy condition; main.nf converts it once, and ENUMERATE refuses anything else.
+    test("ENUMERATE refuses a keep_reference that is not a Boolean") {
+        when {
+            process {
+                """
+                input[0] = ['MT', file('${windows(outputDir)}')]
+                input[1] = [page_size: 200000, split_overlap: 1000]
+                input[2] = 'false'
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).join('\n').contains("keep_reference must be a Boolean, not String 'false'")
+        }
+    }
+
+    test("stub: ENUMERATE") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = ['MT', file('${windows(outputDir)}')]
+                input[1] = [page_size: 200000, split_overlap: 1000]
+                input[2] = false
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert new File(process.out.pairs[0][1]).name == 'enum_MT_0000.tsv'
+        }
+    }
+}

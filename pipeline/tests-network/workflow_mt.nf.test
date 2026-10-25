@@ -1,0 +1,52 @@
+// The whole workflow against the live ClinGen Allele Registry: MT over the 'genes' windows of the
+// UCSC mini tables (one window, chrM 3009-5731, around MT-ND1 and MT-ND2), ClinVar from
+// tests/data/clinvar_mini.vcf.gz (7 MT sites), and the genome built from chrM.fa.gz, both read
+// from a UCSC mirror laid out under the test's output directory. It makes one region request and
+// one lookup, both read-only.
+//
+// Outside tests/ on purpose (Ruling R10): nf-test 0.9.5 cannot leave out a tag, and a plain
+// `nf-test test` must stay offline. Run it explicitly, from pipeline/:
+//   nf-test test tests-network/workflow_mt.nf.test
+
+nextflow_pipeline {
+
+    name    "pipeline: a real MT run against the live Registry"
+    script  "main.nf"
+    tag     "network"
+
+    test("MT run against the live Registry reaches every key") {
+        when {
+            params {
+                chrom       = "MT"
+                regions     = "genes"
+                clinvar_vcf = "${projectDir}/tests/data/clinvar_mini.vcf.gz"
+                ucsc_base   = TestFiles.ucscMirror(projectDir, "${outputDir}/ucsc")
+                outdir      = "${outputDir}/results"
+            }
+        }
+        then {
+            assert workflow.success
+            def results = "${outputDir}/results"
+
+            def reach = path("${results}/reports/reach_MT.txt").readLines()
+                .takeWhile { !it.startsWith('class\t') }.collectEntries { it.split('\t') as List }
+            assert (reach.keys as long) > 1000   // the Registry holds thousands of alleles in 2.7 kb of chrM
+            assert reach.reachable == reach.keys
+            ['wrong_ca', 'not_found', 'ref_mismatch', 'unsupported', 'reference', 'unparseable'].each {
+                assert reach[it] == '0'
+            }
+
+            def coverage = path("${results}/reports/coverage.tsv").readLines()
+            assert coverage.any { it ==~ /MT\tregistry\talleles\t[1-9]\d*/ }
+            assert coverage.contains('MT\tregistry\twindows\t1')
+            assert coverage.contains('MT\tclinvar\tsites\t7')
+            assert coverage.contains('MT\tharvest\tregistered\t7')
+
+            def manifest = new groovy.json.JsonSlurper().parse(new File("${results}/index/manifest.json"))
+            assert manifest.sources == ["registry_genes_${java.time.LocalDate.now()}".toString(), 'clinvar_2026-10-19']
+            assert manifest.genome == '../genome/GRCh38.bin'
+            assert path("${results}/reports/validate_MT.txt").readLines().contains('m\t7\t7\t100.0')
+            assert path("${results}/reports/summary.md").text.contains('Gate: passed')
+        }
+    }
+}

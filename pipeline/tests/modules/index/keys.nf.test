@@ -1,0 +1,72 @@
+// KEYS on tests/data: pairs_MT.tsv (the HGVS<TAB>CAID of the 58 registered rows of
+// harvest_MT.tsv, byte-sorted) handed in as two overlapping, unsorted enumerate outputs, and
+// harvest_MT.tsv itself (60 real ClinVar MT rows, two with their CA ID removed to stand for
+// alleles nobody registered) plus a row the Registry refused.
+
+nextflow_process {
+
+    name    "KEYS"
+    script  "modules/index.nf"
+    process "KEYS"
+    tag     "index"
+
+    test("KEYS sorts and dedups the enumerated and harvested pairs") {
+        def pairs
+        when {
+            pairs = path("${projectDir}/tests/data/pairs_MT.tsv").readLines()
+            def one = TestFiles.write("${outputDir}/enum_MT_0000.tsv", pairs[0..34].reverse())
+            def two = TestFiles.write("${outputDir}/enum_MT_0001.tsv", pairs[23..57].reverse())
+            def harvest = TestFiles.write("${outputDir}/MT.tsv.gz",
+                path("${projectDir}/tests/data/harvest_MT.tsv").readLines() + ['MT\t3307\tA\tN\tERROR:IncorrectReferenceAllele\t\t'])
+            process {
+                """
+                input[0] = ['MT', 'NC_012920.1', [file('${one}'), file('${two}')], file('${harvest}')]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert new File(process.out.shard[0]).name == 'NC_012920.1.tsv'
+            assert path(process.out.shard[0]).readLines() == pairs
+            assert path(process.out.stats[0]).readLines() == [
+                'chrom\taccession\tenum_files\tenumerated\tharvested\tkeys',
+                'MT\tNC_012920.1\t2\t70\t58\t58',
+            ]
+        }
+    }
+
+    // A chromosome with no window (a BED that misses it) still gets its harvested pairs.
+    test("KEYS with no enumerated pairs keeps the harvested ones") {
+        def pairs
+        when {
+            pairs = path("${projectDir}/tests/data/pairs_MT.tsv").readLines()
+            def harvest = TestFiles.write("${outputDir}/MT.tsv.gz", path("${projectDir}/tests/data/harvest_MT.tsv").readLines())
+            process {
+                """
+                input[0] = ['MT', 'NC_012920.1', [], file('${harvest}')]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert path(process.out.shard[0]).readLines() == pairs
+            assert path(process.out.stats[0]).readLines()[1] == 'MT\tNC_012920.1\t0\t0\t58\t58'
+        }
+    }
+
+    test("stub: KEYS") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = ['MT', 'NC_012920.1', [], file('${projectDir}/tests/data/harvest_MT.tsv')]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert new File(process.out.shard[0]).name == 'NC_012920.1.tsv'
+            assert path(process.out.stats[0]).readLines()[1] == 'MT\tNC_012920.1\t0\t0\t0\t0'
+        }
+    }
+}

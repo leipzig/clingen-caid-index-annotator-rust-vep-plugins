@@ -234,6 +234,7 @@ nextflow_pipeline {
             assert counts == expected
             assert path("$outputDir/harvest/MT.tsv.gz").exists()
             assert path("$outputDir/reports/reach_X.txt").exists()
+            assert path("$outputDir/reports/summary.md").exists()
             assert path("$outputDir/index/caid.fst").exists()
         }
     }

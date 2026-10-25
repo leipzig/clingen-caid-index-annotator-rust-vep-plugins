@@ -1,0 +1,73 @@
+// COLLECT on rows of tests/data/harvest_MT.tsv (real ClinVar MT harvest rows), handed in out of
+// order: cached answers and two LOOKUP batches.
+
+nextflow_process {
+
+    name    "COLLECT"
+    script  "modules/index.nf"
+    process "COLLECT"
+    tag     "index"
+
+    test("COLLECT writes the harvest sorted by position") {
+        def harvest
+        when {
+            harvest = path("${projectDir}/tests/data/harvest_MT.tsv").readLines()
+            def cached = TestFiles.write("${outputDir}/cached_MT.tsv", harvest[40..59].reverse())
+            def one = TestFiles.write("${outputDir}/answers_MT_0000.tsv", harvest[0..19].reverse())
+            def two = TestFiles.write("${outputDir}/answers_MT_0001.tsv", harvest[20..39].reverse())
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                """
+                input[0] = ['MT', file('${cached}'), [file('${two}'), file('${one}')]]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def (chrom, out) = process.out.harvest[0]
+            assert chrom == 'MT'
+            assert out.endsWith('harvest/MT.tsv.gz')
+            // harvest_MT.tsv is in this order: POS, then REF and ALT in byte order
+            assert TestFiles.lines(out) == harvest
+            assert TestFiles.lines("${outputDir}/results/harvest/MT.tsv.gz") == harvest
+        }
+    }
+
+    test("COLLECT with nothing looked up writes the cached answers") {
+        when {
+            def cached = TestFiles.write("${outputDir}/cached_MT.tsv", ['MT\t3308\tT\tC\tCA340945\tNC_012920.1:m.3308T>C\t'])
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                """
+                input[0] = ['MT', file('${cached}'), []]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert TestFiles.lines(process.out.harvest[0][1]) == ['MT\t3308\tT\tC\tCA340945\tNC_012920.1:m.3308T>C\t']
+        }
+    }
+
+    test("stub: COLLECT") {
+        options "-stub"
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            process {
+                """
+                input[0] = ['MT', file('${TestFiles.write("${outputDir}/cached_MT.tsv", [])}'), []]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.harvest[0][1].endsWith('harvest/MT.tsv.gz')
+        }
+    }
+}
