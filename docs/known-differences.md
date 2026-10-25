@@ -65,6 +65,20 @@ coverage section). vareffect does not shift a `delins` 3′, which the design
 names as a risk, so every new harvest is still validated and its counts
 recorded here before its index is trusted.
 
+Registry enumeration adds alleles nobody harvested. The regeneration
+pipeline's chr21 run of 2026-10-24 (protein-coding exons ±20 bp plus
+ClinVar; the README's "Regenerating the index" section) indexed 5,212,187
+keys, all but 148 of them enumerated from the Registry, and
+`clingen-index reach` found every key that names a variant again, with its
+own CA ID, from a VCF record written from its HGVS: substitution 4,544,274,
+del 340,083, dup 119,019, ins 169,929 and `delins` 38,878. A key whose HGVS
+`canonical_hgvs` wrote differently would have come back `not_found`. The
+other 4 keys are multi-variant alleles such as
+`NC_000021.9:g.[43068519C>G;43068592G>C]`, which no VCF record names
+(`unparseable`, not a difference). The run's ClinVar chr21 harvest also
+matched in every class it has (substitution 47,989, del 2,261, dup 984,
+ins 240, `delins` 239).
+
 ## Patterns
 
 None so far. When a harvest shows a mismatch pattern, it is either fixed in

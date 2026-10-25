@@ -55,6 +55,7 @@ padded), but it has exactly one canonical HGVS, and so one CA ID.
 | ClinVar 2026-10-19, every chromosome | all 4,571,909 harvested rows match the Registry's HGVS, 22,417 `delins` and 3,134 chrM among them; both tools give the Registry's CA ID for all 4,595,314 registered ClinVar alleles ([ClinVar coverage](#clinvar-coverage)) |
 | End-to-end check, first 100,000 chr21 sites | both tools: all 100,000 CA IDs agree with the harvest ([below](#end-to-end-check)) |
 | Registry region enumeration (`clingen-index registry enumerate`) | **works**; it never pages with `skip`, which loses alleles on the live Registry ([Enumerating the Registry by region](#enumerating-the-registry-by-region)) |
+| Index regeneration pipeline (`pipeline/`, Nextflow) | **works** locally under Docker: chr21 protein-coding exons plus ClinVar on 2026-10-24, 5,212,187 keys, gate passed, both tools give the Registry's CA ID for all 51,692 registered ClinVar chr21 alleles ([Regenerating the index](#regenerating-the-index-nextflow)); SLURM tested only through shims, AWS Batch documented but not deployed, the full exome run not run |
 | Demo data | chr21 only, genome and index (see [Known limitations](#known-limitations)) |
 
 Design: [`docs/superpowers/specs/2026-10-23-clingen-allele-plugin-design.md`](docs/superpowers/specs/2026-10-23-clingen-allele-plugin-design.md).
@@ -98,10 +99,9 @@ demo uses chr21 alone, 46.7 MB:
 scripts/build_chr21_genome.sh data/genome_chr21   # downloads UCSC hg38 chr21.fa.gz
 ```
 
-A whole-genome index needs vareffect's full GRCh38 genome instead, about
-3.1 GB, built once with `vareffect-cli` (`cargo install vareffect-cli`, then
-`vareffect init` and `vareffect setup`, as vareffect's README describes; not
-run here).
+A whole-genome index needs all 25 primary contigs instead, about 3.1 GB,
+which `clingen-index genome` writes from UCSC's `hg38.fa.gz`
+([ClinVar coverage](#clinvar-coverage)).
 
 ### 2. The index (once per harvest)
 
@@ -468,6 +468,412 @@ against the live Registry on 2026-10-24
   `--include_reference` parameter (default `false`) sets that for a whole
   run. The `reference=` count on stderr includes them either way.
 
+## Regenerating the index (Nextflow)
+
+`pipeline/` is a Nextflow workflow that rebuilds the index from current
+sources, for one chromosome or all of them, on a workstation, a SLURM cluster
+or AWS Batch. It:
+
+1. cuts a region set (by default protein-coding exons ±20 bp, from UCSC's
+   RefSeq and GENCODE tables) into query windows and asks the Registry for
+   every allele it holds in each
+   ([Enumerating the Registry by region](#enumerating-the-registry-by-region));
+2. looks up ClinVar's sites (and, with `--datasets`, gnomAD's) in the
+   Registry, reusing the registered answers of earlier harvests given as
+   `--cache`;
+3. builds one index from the enumerated alleles and the registered harvest
+   rows (`build --sorted`, in constant memory);
+4. checks it before publishing: `validate` recomputes every harvested row's
+   HGVS from the genome, and `reach` turns every index key back into a VCF
+   record, looks it up as the tools do and requires the key's own CA ID.
+   `index/` is published only if both pass.
+
+Every task runs one `clingen-index` subcommand or a short shell pipeline, in
+one container image; there is no Python in the pipeline. Design:
+[`docs/superpowers/specs/2026-10-24-index-regeneration-pipeline-design.md`](docs/superpowers/specs/2026-10-24-index-regeneration-pipeline-design.md).
+
+**Requirements.**
+
+- The launcher: Java, Nextflow and nf-test, pinned in
+  `pipeline/environment.yml` (openjdk 21.0.10, nextflow 26.04.7, nf-test
+  0.9.5, and cfn-lint 1.57.2 for the AWS template). With micromamba (conda
+  works the same way):
+
+  ```bash
+  micromamba create -y -p ~/micromamba/envs/clingen-nf -f pipeline/environment.yml
+  export JAVA_HOME=~/micromamba/envs/clingen-nf/lib/jvm PATH=~/micromamba/envs/clingen-nf/bin:$PATH
+  ```
+
+  `micromamba create` does not activate the environment, and Java lives in
+  its `lib/jvm`, hence the two variables.
+- A container engine for the tasks, running the image the repo's
+  `Dockerfile` builds (`docker build -t clingen-index:0.1.0 .`): Docker
+  for `-profile local`, Apptainer on a SLURM cluster (`-profile slurm`, the
+  image pulled from a registry you push it to), the image in ECR on AWS Batch
+  (`-profile awsbatch`). Docker Desktop and Colima share only part of the
+  host with containers (Colima: `$HOME`), so the work directory and every
+  input must be there.
+- Or no container: add the `host` profile last (`-profile local,host`), and
+  the tasks run `clingen-index`, `curl`, `gawk`, `gzip`, `openssl` and
+  coreutils from `PATH`. For a checkout, `cargo build --release -p
+  clingen-index` and put `target/release` on `PATH`.
+- Network access from the tasks labelled `network`: the Registry, UCSC (gene
+  tables, and `hg38.fa.gz` unless `--genome` is given), NCBI (ClinVar, unless
+  `--clinvar_vcf` is a local file) and, for gnomAD, Google Cloud Storage or
+  AWS Open Data.
+
+**Running it.** The spec's three examples, as the pipeline takes them:
+
+```bash
+# one chromosome on this machine (the run measured below)
+nextflow run pipeline -profile local --chrom 21 --regions pc_exons \
+  --cache data/chr21_chunks,data/clinvar/20261019/chunks \
+  --genome "$PWD/data/genome_grch38/GRCh38.bin" \
+  --clinvar_vcf "$PWD/data/clinvar/download/clinvar.vcf.gz" --outdir results/chr21
+
+# protein-coding exons everywhere, on a SLURM cluster
+nextflow run pipeline -profile slurm --chrom all --slurm_queue normal --network_queue transfer \
+  --container ghcr.io/<you>/clingen-index:0.1.0 --outdir /scratch/clingen/pc_exons -resume
+
+# the same on AWS Batch
+nextflow run pipeline -profile awsbatch --chrom all --aws_queue clingen \
+  --container <account>.dkr.ecr.us-east-1.amazonaws.com/clingen-index:0.1.0 \
+  -work-dir s3://<bucket>/work --outdir s3://<bucket>/results/pc_exons -resume
+```
+
+They differ from the spec's examples where the pipeline or this checkout
+needs it. The first spells out the default `--regions pc_exons` and adds
+`--genome` and `--clinvar_vcf`: the whole-genome binary and the ClinVar
+2026-10-19 VCF of [ClinVar coverage](#clinvar-coverage) are already here,
+so the run reuses them rather than building hg38 and downloading the latest
+ClinVar, and its ClinVar sites are those the `--cache` answered. The AWS one drops
+`--gnomad_mirror aws`, which matters only with a gnomAD dataset in
+`--datasets`, and names the queue `clingen`, the template's default. On
+SLURM, launch from a directory on the shared filesystem, or give `-work-dir`
+there: `./work` must be visible to every node.
+[`docs/aws-batch.md`](docs/aws-batch.md) sets up AWS Batch (bucket, queue,
+ECR repository, launcher permissions) and covers costs and teardown; nothing
+there has been deployed.
+
+The main parameters (`nextflow run pipeline --help` lists them all,
+`--helpFull` with details; a misspelt one stops the run):
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `--chrom` | required | `1`–`22`, `X`, `Y`, `MT` (or `chr21`, `chrM`), or `all` |
+| `--regions` | `pc_exons` | `cds`, `pc_exons`, `exons`, `genes`, or a BED file |
+| `--datasets` | `clinvar` | comma-separated: `clinvar`, `gnomad_genomes`, `gnomad_exomes` |
+| `--cache` | none | comma-separated harvest directories (`chunk_*.tsv`, or an earlier run's `harvest/`); their registered answers are not asked again |
+| `--genome` | built | a genome binary with its `.idx`, as an absolute local or shared path; without it `BUILD_GENOME` builds one from UCSC `hg38.fa.gz` for the run's chromosomes |
+| `--clinvar_vcf` | `latest` | or a local `clinvar.vcf.gz`; NCBI's `.md5` beside it is checked when it is there |
+| `--include_reference` | `false` | also index the Registry's reference alleles |
+| `--allow_mismatches` | `false` | publish the index even if a check fails |
+| `--outdir` | `results` | a local path or `s3://…` |
+
+**Outputs** in `--outdir`:
+
+- `index/`: `caid.fst` and `manifest.json`, published only if every check
+  passed. The manifest's sources name the region set and run date
+  (`registry_pc_exons_<date>`) and each dataset's release (`clinvar_<date>`,
+  `gnomad_genomes_v<version>`);
+- `genome/`: `GRCh38.bin` and its `.idx`, when the pipeline built them. The
+  manifest then records the genome as `../genome/GRCh38.bin`, so keep the two
+  directories side by side; a `--genome` you gave is recorded by its path and
+  not copied;
+- `harvest/<chrom>.tsv.gz`: the seven harvest columns for every site looked
+  up or reused, the next run's `--cache`;
+- `reports/`: `summary.md` (the parameters, the gate's result, one row per
+  chromosome, the skipped alleles, the limits), `coverage.tsv` (every count
+  in long format: `chrom source measure value`), `sources.tsv` (each download,
+  its size and md5, and whether the md5 was checked), `skipped.tsv.gz` (each
+  allele not looked up, and why), `validate_<chrom>.txt` and
+  `reach_<chrom>.txt`;
+- `pipeline_info/`: Nextflow's `trace.txt`, `timeline.html` and `report.html`.
+
+`FINALIZE`, which publishes `index/`, waits for `REPORT`, so the reports are
+there even when the gate stops a run.
+
+### The chr21 run (2026-10-24)
+
+The first example above, run on 2026-10-24 at clingen `13824dd` with the
+image `clingen-index:0.1.0` (`123dd454650c`, built from `fe4adae`, whose
+`crates/`, `Cargo.lock` and `Dockerfile` are those of `13824dd`), on an
+Apple M6 (12 cores), 32 GB, macOS 27.0.1, with Docker 29.5.2 in a Colima
+VM of 6 CPUs and 12 GB. The ClinVar VCF is the 2026-10-19 one of
+[ClinVar coverage](#clinvar-coverage), its md5
+`e649bbb1dfe11baafa9feab81a7a7cdd` checked against NCBI's `.md5`. The run
+took 13 min 28 s (`/usr/bin/time`: `real 807.96`) and ended with:
+
+```
+[SUCCESS] completed=15 failed=0 cached=0
+```
+
+`reports/summary.md` gives the gate's result and one row per chromosome:
+
+```
+Gate: passed. Every validate row matched, every reach key that names a variant was found
+again (reference and unparseable keys are only counted), and every chromosome with windows
+enumerated alleles; FINALIZE publishes index/.
+```
+
+| chrom | windows | enumerated | harvest sites | registered | keys | validate | reach |
+|---|---:|---:|---:|---:|---:|---|---|
+| 21 | 669 | 5215913 | 51713 | 51692 | 5212187 | 51713 of 51713 rows match | 5212183 of 5212183 keys reachable, 4 unparseable |
+
+`reports/coverage.tsv`:
+
+```
+chrom	source	measure	value
+21	registry	windows	669
+21	registry	core_bp	4573512
+21	registry	query_bp	4841112
+21	registry	alleles	5215913
+21	clinvar	sites	51713
+21	clinvar	skipped	25
+21	harvest	sites	51713
+21	harvest	cached	51692
+21	harvest	looked_up	21
+21	harvest	registered	51692
+21	index	keys	5212187
+```
+
+The two `ENUMERATE` tasks (500 and 169 windows) printed:
+
+```
+windows=500 requests=500 splits=0 alleles=4494691 reference=1302315 no_grch38_hgvs=0 written=3192376
+windows=169 requests=169 splits=0 alleles=2792299 reference=768762 no_grch38_hgvs=0 written=2023537
+```
+
+That is 669 requests, no answer full enough to split a window, 7,286,990
+alleles returned, 2,071,077 of them reference alleles left out (28%), and
+5,215,913 pairs written. Counted from the work files, 3,874 of those pairs
+are an allele that two windows' overlapping flanks both returned, which
+`KEYS` removes, leaving 5,212,039 distinct enumerated pairs. Of the 51,692
+registered ClinVar chr21 alleles, 51,544 were enumerated too; the other 148
+lie outside the windows or cross their edges and are in the index from the
+lookup alone. The cache answered 51,692 of the 51,713 ClinVar sites; the 21
+it had no CA ID for were asked again, and are still unregistered
+(`LOOKUP`: `sites=21 requests=1 registered=0 unregistered=21 error=0 written=21`).
+
+`reports/validate_21.txt`:
+
+```
+rows=51713 compared=51713 skipped=0 malformed=0
+class	total	match	pct
+substitution	47989	47989	100.0
+del	2261	2261	100.0
+dup	984	984	100.0
+ins	240	240	100.0
+delins	239	239	100.0
+m	0	0	0.0
+other	0	0	0.0
+```
+
+`reports/reach_21.txt`:
+
+```
+keys	5212187
+reachable	5212183
+wrong_ca	0
+not_found	0
+ref_mismatch	0
+unsupported	0
+reference	0
+unparseable	4
+class	keys	reachable
+substitution	4544278	4544274
+del	340083	340083
+dup	119019	119019
+ins	169929	169929
+delins	38878	38878
+m	0	0
+other	0	0
+
+examples:
+unparseable: NC_000021.9:g.[33579447T>G;33583699T>C;33588560T>G] CA645373284 (position is not a positive integer)
+unparseable: NC_000021.9:g.[43068519C>G;43068592G>C] CA2742038401 (position is not a positive integer)
+unparseable: NC_000021.9:g.[44889397G>A;44900489G>T] CA2499306185 (position is not a positive integer)
+unparseable: NC_000021.9:g.[46131981G>A;46132019C>T] CA042778 (position is not a positive integer)
+```
+
+The four unparseable keys are multi-variant alleles (`g.[…;…]`), which the
+region query returns like any other allele and no VCF record names, so
+`reach` counts them and the gate ignores them. Every other key, 38,878
+`delins` among them, came back with its own CA ID from a VCF record written
+from its HGVS.
+
+`index/manifest.json` (`caid.fst` is 54,440,992 bytes, about 10.4 bytes per
+entry):
+
+```json
+{
+  "format_version": 1,
+  "assembly": "GRCh38",
+  "sources": [
+    "registry_pc_exons_2026-10-24",
+    "clinvar_2026-10-19"
+  ],
+  "harvest_date": "2026-10-24",
+  "entries": 5212187,
+  "vareffect_version": "0.6.0",
+  "genome": "/Users/leipzig/Documents/dev/clingen/data/genome_grch38/GRCh38.bin"
+}
+```
+
+Task times from `pipeline_info/trace.txt` (every other task took under a
+second):
+
+| Task | Duration | Peak RSS |
+|---|---:|---:|
+| `ENUMERATE (windows_21_0000)` | 8m 24s | 309.8 MB |
+| `ENUMERATE (windows_21_0001)` | 4m 46s | 439.5 MB |
+| `MERGE_SITES (21)` | 41.3s | 1.9 GB |
+| `SPLIT_CACHE` (the 63 cache files) | 25.4s | 6.9 MB |
+| `CLINVAR_SITES` | 6.2s | 12.6 MB |
+| `FETCH_UCSC` | 6.1s | 14.6 MB |
+| `REACH (21)` | 3.2s | 91.3 MB |
+| `KEYS (21)` | 2.9s | 768.4 MB |
+| `BUILD_INDEX` | 1.5s | 15.8 MB |
+
+Enumeration was 13 min 10 s of the run: 1.18 s per request, about 9,200
+alleles a second, faster than the cost measured before (0.71 s plus 0.10 ms
+per allele) predicts, which is about 20 minutes for these windows.
+
+**Resume.** The same command with `-resume` ran nothing: all 15 tasks are
+`CACHED` in `trace.txt`, and it took 2.78 s.
+
+```
+[SUCCESS] completed=0 failed=0 cached=15
+```
+
+Then the second `ENUMERATE` task's output (`enum_21_0001.tsv`) was deleted
+from its work directory and the command run with `-resume` again. Of the
+Registry tasks, only that one ran again (169 requests, 4m 47s), in a new
+work directory, as Nextflow does for a cached task whose output is gone.
+The five tasks that read its output (`KEYS`, `BUILD_INDEX`, `REACH`,
+`REPORT`, `FINALIZE`) ran again after it; the other nine, the first
+`ENUMERATE`, `LOOKUP` and `VALIDATE` among them, stayed cached:
+
+```
+[SUCCESS] completed=6 failed=0 cached=9
+```
+
+The new `enum_21_0001.tsv` is byte-identical to the deleted one (md5
+`dc1ceb4c667ac09527ca5f97d4d9b25e`), and so are the rebuilt `caid.fst` (md5
+`fee1e8364418752fb8f8fc2f2f1384ed`), `manifest.json` and every report. All
+three runs started on 2026-10-24, so the manifest kept its date.
+
+**End to end.** The 51,738 chr21 records of the ClinVar 2026-10-19 VCF,
+annotated offline by both tools with this index (vep-rs `b03dd5f`, fastVEP
+`cb0a33c`, both rebuilt against this checkout), then checked against the
+run's own harvest. `offline` is the `sandbox-exec` wrapper of the
+[toy run](#4-run-the-toy-vcf):
+
+```bash
+e=data/e2e_pipeline
+mkdir -p $e/harvest $e/sa
+{
+  printf '##fileformat=VCFv4.2\n##contig=<ID=21,length=46709983,assembly=GRCh38>\n'
+  printf '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n'
+  gunzip -c data/clinvar/download/clinvar.vcf.gz |
+    awk -F'\t' -v OFS='\t' '!/^#/ && $1 == "21" {print $1, $2, $3, $4, $5, ".", ".", "."}'
+} > $e/clinvar_chr21.vcf
+gunzip -c results/chr21/harvest/21.tsv.gz > $e/harvest/chunk_00000.tsv
+ln -sfn ../../../results/chr21/index $e/sa/clingen_chr21
+
+offline ../vep-rs/target/release/vep -i $e/clinvar_chr21.vcf -o $e/vep-rs.vcf \
+    --vcf --offline --assembly GRCh38 --force_overwrite --no_stats --quiet \
+    --plugin ClinGen,index=results/chr21/index
+offline ../fastVEP/target/release/fastvep annotate -i $e/clinvar_chr21.vcf \
+    -o $e/fastvep.vcf --sa-dir $e/sa --sa-only --no-progress
+
+python3 -I scripts/e2e_crosscheck.py --harvest $e/harvest --vcf-out $e/vep-rs.vcf --tool vep-rs
+python3 -I scripts/e2e_crosscheck.py --harvest $e/harvest --vcf-out $e/fastvep.vcf --tool fastvep
+```
+
+fastVEP's stderr, then vep-rs's tally from a second run without `--quiet`
+and with `NO_COLOR=1` (vep-rs logs in UTC; it was 22:50 on 2026-10-24
+locally):
+
+```
+Annotating: data/e2e_pipeline/clinvar_chr21.vcf -> data/e2e_pipeline/fastvep.vcf
+Loaded 1 supplementary annotation source(s) from data/e2e_pipeline/sa in 0.0s
+ClinGen: found=51692 not_in_index=21 ref_mismatch=0 unsupported=25
+2026-10-25T04:50:49.942319Z  INFO vep_builtins::plugins::clingen: ClinGen: found=51692 not_in_index=21 ref_mismatch=0 unsupported=2
+```
+
+The vep-rs check, then the fastVEP check (both exit 0):
+
+```
+vcf_alleles=51715 not_in_harvest=2 no_caid=21 excluded=0
+checked=51692 agree=51692 disagree=0 missing=0
+vcf_alleles=51738 not_in_harvest=25 no_caid=21 excluded=0
+checked=51692 agree=51692 disagree=0 missing=0
+```
+
+Both tools give the Registry's CA ID for every one of the 51,692 registered
+ClinVar chr21 alleles. The 21 `not_in_index` are the sites still
+unregistered, and the `unsupported` ones are the 25 skipped records; vep-rs
+drops the 23 with `ALT=.` before any plugin sees them, as in
+[ClinVar coverage](#clinvar-coverage).
+
+### The full exome run (not run)
+
+`--chrom all --regions pc_exons` is the run the spec plans: 60,328 windows
+over 406.7 Mb of protein-coding exons ±20 bp (430.8 Mb with the flanks), in
+133 batches of up to 500, so at least 60,328 Registry requests on one
+stream. It has not been run. The spec estimates about 31 hours from the cost
+per request; at chr21's measured 1.18 s per request it would be nearer
+20 hours, though chr21 need not be typical. Scaled from chr21 by window
+length, the index would hold about 460 million keys in a `caid.fst` of about
+4.8 GB (the spec estimated 550 million and 6.5 GB). Run it with the SLURM or
+AWS Batch example above, or here with `-profile local --chrom all`; without
+`--genome` it builds the genome. `-resume` continues a stopped run from its
+first unfinished batch, and the launcher has to stay up for the whole run.
+
+### Limits
+
+- **Alleles across a window edge or a split point.** A window returns only
+  the alleles lying wholly inside it, so an allele longer than the 200 bp
+  flank (`--flank`) that crosses a window edge is not enumerated, nor one
+  longer than twice the hidden `--split_overlap` (1,000 bp) that crosses the
+  midpoint of a window split because its answer was full
+  ([details](docs/registry-region-query.md)).
+- **Outside the windows,** the index holds only the registered alleles of
+  the harvested datasets, and enumeration is not incremental: the region
+  query cannot ask for what was registered since an earlier run, so every
+  run asks for every window again (`--cache` saves only the lookups).
+- **Reference alleles are opt-in.** By default the index leaves out the
+  Registry's reference alleles (`…=`) and the no-op `delins` alleles that
+  put back the reference's own bases, as no VCF record names either;
+  `--include_reference` keeps both and adds the manifest source
+  `reference_alleles`.
+- **The Registry is read-only to the pipeline and gets one stream.**
+  `ENUMERATE` (region `GET`s) and `LOOKUP` (`POST` lookups) never register
+  anything and run one task at a time each, whatever the executor could run
+  in parallel, so a run's length is set by the Registry, not by the
+  hardware. The Registry is a free public service: contact ClinGen before
+  enumerating more than the protein-coding exons.
+- **A `--genome` you supply must be a local or shared absolute path** that
+  the `BUILD_INDEX` task can open (the manifest records it, and `build`
+  checks it exists), so not an `s3://` URL: on AWS Batch leave it out and let
+  `BUILD_GENOME` build it.
+- **A `-resume` on a later day re-dates the manifest**: its
+  `registry_<set>_<date>` source and `harvest_date` take the day of the
+  latest start, although the cached `ENUMERATE` tasks keep their older
+  answers. `pipeline_info/trace.txt` has when each task really ran.
+
+### Tests
+
+`nf-test test` in `pipeline/` runs 92 tests offline (every process, and stub
+and real workflow runs against a mock Registry; 92 passed in 230 s on
+2026-10-24). `nf-test test tests-network/workflow_mt.nf.test` there runs the
+workflow on chrM against the live Registry. `bash
+pipeline/tests/run_slurm_shim.sh` runs the `slurm` profile through
+`sbatch`/`squeue`/`scancel` shims that run the jobs locally, and `bash
+pipeline/tests/check_profiles.sh` checks what each profile resolves to. No
+real SLURM cluster or AWS account has run the pipeline.
+
 ## chr21 index
 
 Built on 2026-10-23 from the gnomAD v4.1 chr21 harvest, with the chr21-only
@@ -526,9 +932,19 @@ Registry and then annotated by both tools. Measured on 2026-10-24.
 
 The whole-genome binary holds UCSC hg38's 25 primary contigs
 (`hg38.fa.gz`, md5 `1c9dcaddfa41027f17cd8f7a82c7293b`; 3,088,286,401 bytes).
-It was written with a one-off converter around vareffect's
-`write_genome_binary`; the regeneration pipeline adds this step to
-`clingen-index`. The rest, with `offline` as [above](#end-to-end-check):
+It was first written with a one-off converter around vareffect's
+`write_genome_binary`. `clingen-index genome` now writes it, byte for byte
+the same (re-run on 2026-10-24: `contigs=25 bases=3088286401`, 10.7 s, both
+files identical), and the regeneration pipeline's `BUILD_GENOME` task runs
+it when no `--genome` is given
+([Regenerating the index](#regenerating-the-index-nextflow)):
+
+```bash
+./target/release/clingen-index genome --fasta data/genome_grch38/download/hg38.fa.gz \
+    --out data/genome_grch38/GRCh38.bin
+```
+
+The rest, with `offline` as [above](#end-to-end-check):
 
 ```bash
 cv=data/clinvar/20261019
@@ -639,9 +1055,12 @@ check](#end-to-end-check), with `index=data/index_corpus` and
 
 ```
 crates/      clingen-allele (library) and clingen-index (CLI)
+pipeline/    Nextflow index regeneration: workflow, profiles, nf-test, AWS Batch template
+Dockerfile   the pipeline's task image (clingen-index and the tools its tasks run)
 harvest/     Registry harvester (Python, standard library only)
 scripts/     chr21 genome build, conformance sample, end-to-end cross-check
 examples/    toy VCF and lookup recipe
-docs/        design specs, implementation plans, known differences, Registry region-query findings
+docs/        design specs, implementation plans, known differences, Registry region-query findings, AWS Batch guide
 data/ logs/  harvest output, genome, index and run outputs (gitignored)
+results/     pipeline output (gitignored)
 ```
