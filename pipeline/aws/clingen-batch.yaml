@@ -1,0 +1,209 @@
+# AWS Batch for the index regeneration pipeline; docs/aws-batch.md walks through it.
+#   cfn-lint pipeline/aws/clingen-batch.yaml
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AWS Batch setup for the ClinGen CA-ID index regeneration pipeline (Nextflow awsbatch profile):
+  S3 bucket (work/ expires), ECR repository, ECS instance role and profile, launch template with a
+  larger gp3 root volume, managed EC2/Spot compute environment and a job queue.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: ""
+    Description: >-
+      Name for the work and results bucket (S3 names are global); leave empty to let CloudFormation
+      generate one. Do not change it on a live stack: that replaces the bucket.
+  RepositoryName:
+    Type: String
+    Default: clingen-index
+    Description: ECR repository for the task image.
+  QueueName:
+    Type: String
+    Default: clingen
+    Description: Batch job queue name; pass it as --aws_queue.
+  ComputeType:
+    Type: String
+    Default: SPOT
+    AllowedValues: [SPOT, EC2]
+    Description: SPOT is cheaper but an instance can be reclaimed (the profile lets Batch retry); EC2 is on-demand.
+  InstanceTypes:
+    Type: CommaDelimitedList
+    Default: optimal
+    Description: >-
+      "optimal" (the default_x86_64 families: m6i, c6i, r6i, c7i), "default_arm64" for an arm64 image,
+      or named families such as c6i,m6i,r6i,c7i,m7i. They must all share the image's architecture.
+  MaxvCpus:
+    Type: Number
+    Default: 64
+    MinValue: 1
+    Description: >-
+      Most vCPUs Batch may run at once. ENUMERATE and LOOKUP run one task at a time by design, so
+      more vCPUs help only the other steps, which run in parallel across chromosomes.
+  RootVolumeGiB:
+    Type: Number
+    Default: 200
+    MinValue: 30
+    Description: >-
+      Root volume of each instance, in GiB; it holds the Docker images and every task's scratch
+      files. The ECS AL2023 AMI default is 30 GiB, too little for the sort steps and for VALIDATE,
+      which unpacks one chromosome's harvest (several GB for chr1 with gnomAD).
+  WorkExpirationDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    Description: Days after which objects under work/ expire. A -resume needs the work files of the tasks it reuses.
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets with internet egress (NAT or public IP) for the Registry, NCBI, UCSC and GCS.
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Security groups for the instances; outbound HTTPS is enough, no inbound rules needed.
+
+Conditions:
+  IsSpot: !Equals [!Ref ComputeType, SPOT]
+  HasBucketName: !Not [!Equals [!Ref BucketName, ""]]
+
+Resources:
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If [HasBucketName, !Ref BucketName, !Ref "AWS::NoValue"]
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-work
+            Status: Enabled
+            Prefix: work/
+            ExpirationInDays: !Ref WorkExpirationDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"expire untagged images after 14 days",
+            "selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":14},
+            "action":{"type":"expire"}}]}
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: clingen-bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource: !GetAtt Bucket.Arn
+              - Sid: Objects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:PutObjectTagging
+                  - s3:AbortMultipartUpload
+                Resource: !Sub "${Bucket.Arn}/*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        # No ImageId: Batch picks the ECS-optimized AL2023 AMI (root device /dev/xvda).
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref RootVolumeGiB
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+
+  ComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      Type: MANAGED
+      State: ENABLED
+      # No ServiceRole: Batch uses (or creates) the AWSServiceRoleForBatch service-linked role.
+      ReplaceComputeEnvironment: false
+      UpdatePolicy:
+        TerminateJobsOnUpdate: false
+        JobExecutionTimeoutMinutes: 30
+      ComputeResources:
+        Type: !Ref ComputeType
+        AllocationStrategy: !If [IsSpot, SPOT_PRICE_CAPACITY_OPTIMIZED, BEST_FIT_PROGRESSIVE]
+        MinvCpus: 0
+        MaxvCpus: !Ref MaxvCpus
+        InstanceTypes: !Ref InstanceTypes
+        Subnets: !Ref Subnets
+        SecurityGroupIds: !Ref SecurityGroupIds
+        InstanceRole: !GetAtt InstanceProfile.Arn
+        Ec2Configuration:
+          - ImageType: ECS_AL2023
+        LaunchTemplate:
+          LaunchTemplateId: !Ref LaunchTemplate
+          Version: !GetAtt LaunchTemplate.LatestVersionNumber
+        UpdateToLatestImageVersion: true
+        Tags:
+          Name: clingen-batch
+
+  JobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      JobQueueName: !Ref QueueName
+      State: ENABLED
+      Priority: 1
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref ComputeEnvironment
+
+Outputs:
+  BucketName:
+    Description: Bucket for the work directory (s3://<bucket>/work) and the results (s3://<bucket>/results)
+    Value: !Ref Bucket
+  JobQueueName:
+    Description: Pass as --aws_queue
+    Value: !Ref QueueName
+  RepositoryUri:
+    Description: The image is <RepositoryUri>:<tag>; pass it as --container
+    Value: !GetAtt Repository.RepositoryUri

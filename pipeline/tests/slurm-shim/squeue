@@ -1,0 +1,139 @@
+#!/bin/bash
+# Fake `squeue` for the fake `sbatch`/`scancel` shims (see sbatch).
+#
+# Nextflow (slurm executor) runs:
+#   squeue --noheader -o '%i %t' -t all [-p <queue>] -u <user>
+#   squeue --noheader -o '%i %t' -t all --only-job-state   (onlyJobState=true)
+# and expects lines "<jobid> <state>" with no leading blanks.
+#
+# State codes: PD before the runner pid is recorded; R while the job runs;
+# CG while a cancelled job is still shutting down; then CD (exit 0),
+# F (non-zero exit, as real SLURM reports a failed batch script) or CA
+# (cancelled). Supported options: -h/--noheader, -o/--format (%i %A %t %T
+# %j %P %u %%, widths like %.18i ignored), -t/--states (default: pending and
+# running only; 'all' or a comma list), -p/--partition, -u/--user, --me,
+# -j/--jobs; others (e.g. --only-job-state) are accepted and ignored.
+# FAKE_SLURM_HIDE_FINISHED=1 drops finished jobs from every listing, to
+# simulate SLURM forgetting them (MinJobAge).
+
+set -u
+
+state=${FAKE_SLURM_DIR:-${TMPDIR:-/tmp}/fake-slurm-$(id -u)}
+state=${state%/}
+
+header=1 fmt='%.18i %.9P %.8j %.8u %.2t' states='' users='' parts='' ids=''
+
+need() { [ $# -ge 2 ] || { printf 'squeue: error: option %s requires an argument\n' "$1" >&2; exit 1; }; }
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        -h|--noheader)   header=0 ;;
+        -o|--format)     need "$@"; fmt=$2; shift ;;
+        --format=*)      fmt=${1#*=} ;;
+        -o?*)            fmt=${1#-o} ;;
+        -t|--states)     need "$@"; states=$2; shift ;;
+        --states=*)      states=${1#*=} ;;
+        -p|--partition)  need "$@"; parts=$2; shift ;;
+        --partition=*)   parts=${1#*=} ;;
+        -u|--user)       need "$@"; users=$2; shift ;;
+        --user=*)        users=${1#*=} ;;
+        --me)            users=$(id -un) ;;
+        -j|--jobs)       need "$@"; ids=$2; shift ;;
+        --jobs=*)        ids=${1#*=} ;;
+        -M|--clusters|-A|--account|-q|--qos|-w|--nodelist|-n|--name|-L|--licenses|-R|--reservation|-S|--sort|-i|--iterate|-O|--Format)
+                         need "$@"; shift ;;
+        *)               ;;   # --only-job-state, -a, -l, -r, --array, ...
+    esac
+    shift
+done
+
+# Drop width/justification modifiers: %.18i -> %i, %-10j -> %j
+fmt=$(printf '%s' "$fmt" | sed 's/%[-.0-9]*\([A-Za-z%]\)/%\1/g')
+states=$(printf '%s' "$states" | tr '[:lower:]' '[:upper:]')
+
+render() { # <id> <st> <name> <partition> <user> <STATE>
+    local f=$fmt i=0 c out=''
+    while [ "$i" -lt "${#f}" ]; do
+        c=${f:$i:1}
+        if [ "$c" = '%' ] && [ $((i + 1)) -lt "${#f}" ]; then
+            i=$((i + 1)); c=${f:$i:1}
+            case $c in
+                i|A) out=$out$1 ;;
+                t)   out=$out$2 ;;
+                j)   out=$out$3 ;;
+                P)   out=$out$4 ;;
+                u)   out=$out$5 ;;
+                T)   out=$out$6 ;;
+                %)   out=$out% ;;
+                *)   out=${out}N/A ;;
+            esac
+        else
+            out=$out$c
+        fi
+        i=$((i + 1))
+    done
+    printf '%s\n' "$out"
+}
+
+in_list() { # <value> <comma-list>
+    case ",$2," in *",$1,"*) return 0 ;; esac
+    return 1
+}
+
+long_state() {
+    case $1 in
+        PD) echo PENDING ;; R) echo RUNNING ;; CG) echo COMPLETING ;;
+        CD) echo COMPLETED ;; F) echo FAILED ;; CA) echo CANCELLED ;;
+        *) echo UNKNOWN ;;
+    esac
+}
+
+job_state() { # <jobdir>
+    local d=$1 pid='' rc=''
+    [ -f "$d/pid" ] && pid=$(cat "$d/pid")
+    [ -f "$d/rc" ] && rc=$(cat "$d/rc")
+    if [ -n "$rc" ]; then
+        if [ -f "$d/cancelled" ]; then echo CA
+        elif [ "$rc" = 0 ]; then echo CD
+        else echo F
+        fi
+    elif [ -z "$pid" ]; then
+        echo PD
+    elif kill -0 "$pid" 2> /dev/null; then
+        if [ -f "$d/cancelled" ]; then echo CG; else echo R; fi
+    elif [ -f "$d/cancelled" ]; then
+        echo CA          # killed (e.g. SIGKILL) before it could record rc
+    else
+        echo F           # runner vanished without recording rc
+    fi
+}
+
+[ "$header" = 1 ] && render JOBID ST NAME PARTITION USER STATE
+
+[ -d "$state/jobs" ] || exit 0
+for d in "$state"/jobs/*; do
+    [ -d "$d" ] || continue
+    id=${d##*/}
+    case $id in ''|*[!0-9]*) continue ;; esac
+    [ -n "$ids" ] && ! in_list "$id" "$ids" && continue
+
+    st=$(job_state "$d")
+    lst=$(long_state "$st")
+    case $st in
+        CD|F|CA) [ "${FAKE_SLURM_HIDE_FINISHED:-0}" = 1 ] && continue ;;
+    esac
+    if [ -z "$states" ]; then
+        case $st in PD|R|CG) ;; *) continue ;; esac
+    elif [ "$states" != ALL ]; then
+        in_list "$st" "$states" || in_list "$lst" "$states" || continue
+    fi
+
+    name=$(cat "$d/name" 2> /dev/null)
+    part=$(cat "$d/partition" 2> /dev/null)
+    user=$(cat "$d/user" 2> /dev/null)
+    [ -n "$parts" ] && ! in_list "$part" "$parts" && continue
+    [ -n "$users" ] && ! in_list "$user" "$users" && continue
+
+    render "$id" "$st" "$name" "$part" "$user" "$lst"
+done
+exit 0

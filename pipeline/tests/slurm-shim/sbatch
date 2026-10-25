@@ -1,0 +1,199 @@
+#!/bin/bash
+# Fake `sbatch` for testing Nextflow's slurm executor on a machine without SLURM.
+#
+# Runs the batch script locally, in the background, in its own process group,
+# and prints "Submitted batch job <id>" (or just "<id>" with --parsable).
+# Honours #SBATCH and command-line -D|--chdir, -o|--output, -e|--error,
+# -J|--job-name, -p|--partition, -c|--cpus-per-task, --wrap, --parsable;
+# other options are accepted and ignored. Job arrays (-a|--array) are refused.
+# Command-line options override #SBATCH directives, as in real sbatch.
+#
+# State: $FAKE_SLURM_DIR (default ${TMPDIR:-/tmp}/fake-slurm-<uid>), one
+# directory per job holding: pid, rc (written when the script exits),
+# cancelled (written by scancel), name, partition, user, workdir.
+# Works with macOS /bin/bash 3.2 and Linux bash; no GNU-only tools.
+
+set -u
+
+die() { printf 'sbatch: error: %s\n' "$*" >&2; exit 1; }
+
+state=${FAKE_SLURM_DIR:-${TMPDIR:-/tmp}/fake-slurm-$(id -u)}
+state=${state%/}
+mkdir -p "$state/jobs" || die "cannot create state directory $state/jobs"
+
+# Options that take a value. Short: all but sbatch's flag letters
+# (-h -H -I -k -O -Q -s -u -v -V -W). Long: the common valued options;
+# an unknown long option without '=' is treated as a flag.
+takes_value() {
+    case $1 in
+        -[hHIkOQsuvVW]) return 1 ;;
+        -?) return 0 ;;
+        --account|--array|--begin|--chdir|--clusters|--comment|--constraint|\
+        --cpus-per-gpu|--cpus-per-task|--dependency|--distribution|--error|\
+        --exclude|--export|--gpus|--gres|--input|--job-name|--licenses|\
+        --mail-type|--mail-user|--mem|--mem-per-cpu|--mem-per-gpu|--nodelist|\
+        --nodes|--ntasks|--ntasks-per-node|--output|--partition|--qos|\
+        --reservation|--signal|--time|--tmp|--wckey|--wrap) return 0 ;;
+    esac
+    return 1
+}
+
+o_chdir='' o_out='' o_err='' o_name='' o_part='' o_cpus='' o_array='' o_wrap='' o_parsable=0
+
+set_opt() { # <option> <value>
+    case $1 in
+        -D|--chdir)         o_chdir=$2 ;;
+        -o|--output)        o_out=$2 ;;
+        -e|--error)         o_err=$2 ;;
+        -J|--job-name)      o_name=$2 ;;
+        -p|--partition)     o_part=$2 ;;
+        -c|--cpus-per-task) o_cpus=$2 ;;
+        -a|--array)         o_array=$2 ;;
+        --wrap)             o_wrap=$2 ;;
+        --parsable)         o_parsable=1 ;;
+    esac
+}
+
+# parse_opts ARGS... : applies the leading options in ARGS and sets
+# `consumed` to how many arguments they used (the script path comes next).
+parse_opts() {
+    consumed=0
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --) consumed=$((consumed + 1)); return ;;
+            --*=*) set_opt "${1%%=*}" "${1#*=}" ;;
+            --*|-?)
+                if takes_value "$1"; then
+                    [ $# -ge 2 ] || die "option '$1' requires an argument"
+                    set_opt "$1" "$2"; shift; consumed=$((consumed + 1))
+                else
+                    set_opt "$1" ''
+                fi ;;
+            -?*) set_opt "${1:0:2}" "${1:2}" ;;   # attached value: -o/path, -c2
+            *) return ;;
+        esac
+        shift; consumed=$((consumed + 1))
+    done
+}
+
+unescape() { printf '%s' "$1" | sed 's/\\\(.\)/\1/g'; }   # "/a\ b" -> "/a b"
+
+submit_dir=$PWD
+
+# Command line, pass 1: find where the options end and the script begins.
+parse_opts "$@"
+ncli=$consumed
+cli=("$@")
+shift "$ncli"
+
+# Allocate a job id atomically (mkdir is atomic, so concurrent calls are safe).
+id=$(cat "$state/last_id" 2>/dev/null)
+case $id in ''|*[!0-9]*) id=1000 ;; esac
+while :; do
+    id=$((id + 1))
+    mkdir "$state/jobs/$id" 2>/dev/null && break
+done
+printf '%s\n' "$id" > "$state/last_id"
+jobdir=$state/jobs/$id
+
+# The script: --wrap, a file argument, or stdin. (Nextflow passes the file
+# name `.command.run`; it pipes the script on stdin only when Fusion is on.)
+if [ -n "$o_wrap" ]; then
+    printf '#!/bin/sh\n%s\n' "$o_wrap" > "$jobdir/script"
+    script=$jobdir/script
+elif [ $# -gt 0 ]; then
+    script=$1; shift
+    case $script in /*) ;; *) script=$submit_dir/$script ;; esac
+    if [ ! -r "$script" ]; then rm -rf "$jobdir"; die "Unable to open file $script"; fi
+else
+    cat > "$jobdir/script"
+    script=$jobdir/script
+fi
+
+# Pass 2: #SBATCH directives. Like sbatch, stop at the first line that is
+# neither blank nor a comment. Then pass 3: the command line again, so it wins.
+# Note: xargs rejects an unbalanced ' or " ("unterminated quote"); that line's
+# option is then lost but the submit still succeeds.
+while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+        '#SBATCH'[[:space:]]*)
+            toks=()
+            # xargs splits words honouring quotes and never executes anything
+            while IFS= read -r t; do toks[${#toks[@]}]=$t; done \
+                < <(printf '%s\n' "${line#\#SBATCH}" | xargs printf '%s\n')
+            [ ${#toks[@]} -gt 0 ] && parse_opts "${toks[@]}" ;;
+        '#'*|'') ;;
+        *) break ;;
+    esac
+done < "$script"
+[ "$ncli" -gt 0 ] && parse_opts "${cli[@]:0:$ncli}"
+
+if [ -n "$o_array" ]; then
+    rm -rf "$jobdir"; die "job arrays (--array $o_array) are not supported by this shim"
+fi
+
+name=${o_name:-$(basename "$script")}
+user=$(id -un)
+part=${o_part:-${FAKE_SLURM_PARTITION:-normal}}
+workdir=$(unescape "${o_chdir:-$submit_dir}")
+case $workdir in /*) ;; *) workdir=$submit_dir/$workdir ;; esac
+
+# Output files: default slurm-%j.out; no -e means stderr goes with stdout.
+# Relative paths resolve against the job's working directory (the runner
+# cd's there before opening them). %j, %x, %u are expanded; %% is a '%'.
+expand() {
+    local p pct=$'\001'
+    p=$(unescape "$1")
+    p=${p//\%\%/$pct}
+    p=${p//\%j/$id}; p=${p//\%x/$name}; p=${p//\%u/$user}
+    p=${p//$pct/%}
+    printf '%s' "$p"
+}
+out=$(expand "${o_out:-slurm-%j.out}")
+if [ -n "$o_err" ]; then err=$(expand "$o_err"); else err=$out; fi
+
+printf '%s\n' "$name" > "$jobdir/name"
+printf '%s\n' "$part" > "$jobdir/partition"
+printf '%s\n' "$user" > "$jobdir/user"
+printf '%s\n' "$workdir" > "$jobdir/workdir"
+
+# Interpreter from the shebang, as slurmd would use (Nextflow: #!/bin/bash).
+interp=/bin/sh
+IFS= read -r first < "$script" || true
+case $first in '#!'*) interp=${first#\#!} ;; esac
+
+export SLURM_JOB_ID=$id SLURM_JOBID=$id SLURM_JOB_NAME=$name \
+       SLURM_JOB_PARTITION=$part SLURM_SUBMIT_DIR=$submit_dir SLURM_JOB_USER=$user
+[ -n "$o_cpus" ] && export SLURM_CPUS_PER_TASK=$o_cpus
+
+# Launch. `set -m` puts the job in its own process group (pgid = runner pid)
+# so scancel can signal the whole tree. The runner traps TERM (a trap, not
+# an ignore, so the job's own TERM trap still works) and survives to record
+# the exit code. All of sbatch's stdio is detached from the job: Nextflow
+# reads sbatch's output until EOF, so an inherited pipe would block submit.
+set -m
+(
+    trap '' HUP
+    trap ':' TERM
+    rc=1
+    if cd "$workdir"; then
+        set -f
+        # shellcheck disable=SC2086  # interp may be "/usr/bin/env bash"
+        if [ "$err" = "$out" ]; then
+            $interp "$script" "$@" > "$out" 2>&1 < /dev/null
+        else
+            $interp "$script" "$@" > "$out" 2> "$err" < /dev/null
+        fi
+        rc=$?
+    fi
+    printf '%s\n' "$rc" > "$jobdir/rc.tmp" && mv -f "$jobdir/rc.tmp" "$jobdir/rc"
+) < /dev/null > /dev/null 2>&1 &
+pid=$!
+set +m
+printf '%s\n' "$pid" > "$jobdir/pid"
+
+if [ "$o_parsable" = 1 ]; then
+    printf '%s\n' "$id"
+else
+    printf 'Submitted batch job %s\n' "$id"
+fi

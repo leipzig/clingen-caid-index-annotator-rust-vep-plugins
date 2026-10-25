@@ -1,0 +1,71 @@
+#!/bin/bash
+# Fake `scancel` for the fake `sbatch`/`squeue` shims (see sbatch).
+#
+# Nextflow runs `scancel <id> [<id>...]` (up to executor.killBatchSize ids,
+# default 100) and waits at most 10 s for it. Like SLURM, this sends SIGCONT
+# and SIGTERM to every process of the job (its process group), then SIGKILL
+# to whatever is left after $FAKE_SLURM_KILL_WAIT seconds (default 5; SLURM's
+# KillWait default is 30), in the background, so scancel itself returns at
+# once. The job is marked cancelled: squeue shows CG while it shuts down,
+# then CA.
+# -s/--signal SIG only delivers SIG (no cancel, no SIGKILL), as in SLURM.
+# Unknown ids print an error and make the exit status 1; finished jobs are
+# skipped. Filters (-u, -p, -n, ...) are not supported and ignored.
+
+set -u
+
+state=${FAKE_SLURM_DIR:-${TMPDIR:-/tmp}/fake-slurm-$(id -u)}
+state=${state%/}
+wait_s=${FAKE_SLURM_KILL_WAIT:-5}
+
+sig='' status=0 ids=''
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        -s|--signal) [ $# -ge 2 ] || { echo 'scancel: error: option requires an argument -- s' >&2; exit 1; }
+                     sig=$2; shift ;;
+        --signal=*)  sig=${1#*=} ;;
+        -s?*)        sig=${1#-s} ;;
+        -u|--user|-p|--partition|-n|--name|-t|--state|-A|--account|-q|--qos|-w|--nodelist|-M|--clusters|-R|--reservation)
+                     printf 'scancel: warning: %s is ignored by this shim\n' "$1" >&2; shift ;;
+        -*)          ;;   # -b/--batch, -f/--full, -Q, -v, -i, ...
+        *)           ids="$ids $1" ;;
+    esac
+    shift
+done
+sig=${sig#SIG}
+
+signal_job() { # <pgid> <signal> : the whole process group, else the leader
+    kill -s "$2" -- "-$1" 2> /dev/null || kill -s "$2" "$1" 2> /dev/null
+}
+
+for id in $ids; do
+    jid=${id%%.*}                       # 123.batch -> 123
+    d=$state/jobs/$jid
+    case $jid in ''|*[!0-9]*) d='' ;; esac
+    if [ -z "$d" ] || [ ! -d "$d" ]; then
+        printf 'scancel: error: Kill job error on job id %s: Invalid job id specified\n' "$id" >&2
+        status=1
+        continue
+    fi
+    [ -f "$d/rc" ] && continue          # already finished
+    pid=$(cat "$d/pid" 2> /dev/null)
+    [ -n "$pid" ] || continue
+    kill -0 "$pid" 2> /dev/null || continue
+
+    if [ -n "$sig" ]; then
+        signal_job "$pid" "$sig"
+        continue
+    fi
+
+    : > "$d/cancelled"
+    signal_job "$pid" CONT
+    signal_job "$pid" TERM
+    (
+        sleep "$wait_s"
+        # Unconditional: the Nextflow wrapper can exit (and rc be written) while
+        # task processes that ignore TERM are still alive in the group.
+        kill -s KILL -- "-$pid" 2> /dev/null   # leftovers too, as SLURM does after KillWait
+    ) < /dev/null > /dev/null 2>&1 &
+done
+exit $status
