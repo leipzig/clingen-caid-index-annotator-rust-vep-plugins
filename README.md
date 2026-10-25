@@ -48,7 +48,7 @@ padded), but it has exactly one canonical HGVS, and so one CA ID.
 | Harvester (`harvest/`): Registry lookup for a sites list | **works**; the [lookup recipe](#harvest-step-look-up-a-toy-vcf-in-the-live-registry) runs it |
 | gnomAD v4.1 chr21 harvest | **done** (2026-10-23): 10,958,898 sites, all registered |
 | `clingen-allele` crate (vareffect HGVS + local index) | **works**; on local `main` |
-| `clingen-index` CLI (`build`, `validate`) | **works**; on local `main` |
+| `clingen-index` CLI (`genome`, `build [--sorted]`, `regions`, `registry enumerate\|lookup`, `validate [--strict]`, `reach`) | **works**; `build` and `validate` on local `main`; the rest, with `build --sorted` and `validate --strict`, on `feature/regeneration-pipeline` |
 | vep-rs plugin `--plugin ClinGen` | **works** offline; merged into a local vep-rs `main`, not pushed |
 | fastVEP provider (`FV_CLINGEN`) | **works** offline; merged into a local fastVEP `master`, not pushed |
 | chr21 conformance with the Registry | all 10,958,898 rows match the Registry's HGVS ([details](docs/known-differences.md)) |
@@ -131,9 +131,11 @@ cargo run -p clingen-index --release -- build --chunks data/chr21_chunks \
 `build` records `--genome` in `manifest.json` as an absolute path, and both
 tools use it when they are not given a genome. Rebuilding into the same
 `--out` replaces the index by rename: a running tool keeps reading the old
-one, and a build that fails before the rename leaves it in place. `build` holds every row in memory
-(see [Known limitations](#known-limitations)). [chr21 index](#chr21-index)
-has its size.
+one, and a build that fails before the rename leaves it in place. `build
+--chunks` holds every row in memory; `build --sorted` reads (HGVS, CA ID)
+pairs already in byte order and runs in constant memory, which is how the
+regeneration pipeline builds (see [Known limitations](#known-limitations)).
+[chr21 index](#chr21-index) has its size.
 
 ### 3. The tools
 
@@ -519,8 +521,10 @@ one container image; there is no Python in the pipeline. Design:
   clingen-index` and put `target/release` on `PATH`.
 - Network access from the tasks labelled `network`: the Registry, UCSC (gene
   tables, and `hg38.fa.gz` unless `--genome` is given), NCBI (ClinVar, unless
-  `--clinvar_vcf` is a local file) and, for gnomAD, Google Cloud Storage or
-  AWS Open Data.
+  `--clinvar_vcf` is a local file) and, for gnomAD, Google Cloud Storage:
+  the file listing and the md5 sums always come from there, so with
+  `--gnomad_mirror aws` the tasks need AWS Open Data (where the files are
+  downloaded from) as well as Google Cloud Storage.
 
 **Running it.** The spec's three examples, as the pipeline takes them:
 
@@ -550,13 +554,42 @@ ClinVar, and its ClinVar sites are those the `--cache` answered. The AWS one dro
 `--gnomad_mirror aws`, which matters only with a gnomAD dataset in
 `--datasets`, and names the queue `clingen`, the template's default. On
 SLURM, launch from a directory on the shared filesystem, or give `-work-dir`
-there: `./work` must be visible to every node.
-[`docs/aws-batch.md`](docs/aws-batch.md) sets up AWS Batch (bucket, queue,
-ECR repository, launcher permissions) and covers costs and teardown; nothing
-there has been deployed.
+there: `./work` must be visible to every node. Every task there gets the
+partition's default time limit except `GNOMAD_SITES`, which asks for 24
+hours (`time` in `pipeline/conf/slurm.config`), as it streams a multi-GB
+gnomAD VCF per chromosome. [`docs/aws-batch.md`](docs/aws-batch.md) sets up
+AWS Batch (bucket, queue, ECR repository, launcher permissions) and covers
+costs and teardown; nothing there has been deployed.
 
-The main parameters (`nextflow run pipeline --help` lists them all,
-`--helpFull` with details; a misspelt one stops the run):
+**`-resume` continues one regeneration; it does not start a new one.** In
+the two long runs it carries on after a stop: Nextflow reuses every task
+that finished and runs only those that did not. It reuses the downloads too:
+`--clinvar_vcf latest`, gnomAD's `latest` and the UCSC tables have no input
+that changes when the remote file does, and `ENUMERATE` asks about the same
+windows, so a `-resume` next month from the same launch directory would
+hand back this month's index, its manifest still dated this month. For a new
+regeneration (a newer ClinVar, gnomAD or UCSC release, alleles registered
+since), launch from a fresh directory, or leave out `-resume`. A new
+`-work-dir` alone is not enough: `-resume` finds the earlier tasks through
+`.nextflow/` in the launch directory, wherever their work files are (a stub
+run from the same directory with a new `-work-dir` and `-resume` reported
+`cached=15`).
+
+**Local resources.** `-profile local` caps every task at 2 CPUs and 12 GB
+(`process.resourceLimits` in `pipeline/conf/local.config`): Nextflow's local
+executor refuses a task that asks for more than the machine has, and the
+sorting steps ask for 4 CPUs and 16 GB. The chr21 run's largest task peaked
+at 1.9 GB, so a 16 GB, 2-CPU machine runs it. On a larger machine, raise the
+caps with a config file given with `-c`:
+
+```bash
+echo 'process.resourceLimits = [cpus: 8, memory: 48.GB]' > bigger.config
+nextflow run pipeline -profile local -c bigger.config --chrom 21 --outdir results/chr21
+```
+
+The main parameters (`nextflow run pipeline --help` lists them, `--helpFull`
+with details and `--showHidden` with the hidden ones too, such as
+`--page_size` and the endpoints; a misspelt one stops the run):
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -564,7 +597,7 @@ The main parameters (`nextflow run pipeline --help` lists them all,
 | `--regions` | `pc_exons` | `cds`, `pc_exons`, `exons`, `genes`, or a BED file |
 | `--datasets` | `clinvar` | comma-separated: `clinvar`, `gnomad_genomes`, `gnomad_exomes` |
 | `--cache` | none | comma-separated harvest directories (`chunk_*.tsv`, or an earlier run's `harvest/`); their registered answers are not asked again |
-| `--genome` | built | a genome binary with its `.idx`, as an absolute local or shared path; without it `BUILD_GENOME` builds one from UCSC `hg38.fa.gz` for the run's chromosomes |
+| `--genome` | built | a genome binary with its `.idx`, as a local or shared path (an `s3://` one, or any with an `s3://` work directory, is refused at launch); without it `BUILD_GENOME` builds one from UCSC `hg38.fa.gz` for the run's chromosomes |
 | `--clinvar_vcf` | `latest` | or a local `clinvar.vcf.gz`; NCBI's `.md5` beside it is checked when it is there |
 | `--include_reference` | `false` | also index the Registry's reference alleles |
 | `--allow_mismatches` | `false` | publish the index even if a check fails |
@@ -573,9 +606,13 @@ The main parameters (`nextflow run pipeline --help` lists them all,
 **Outputs** in `--outdir`:
 
 - `index/`: `caid.fst` and `manifest.json`, published only if every check
-  passed. The manifest's sources name the region set and run date
-  (`registry_pc_exons_<date>`) and each dataset's release (`clinvar_<date>`,
-  `gnomad_genomes_v<version>`);
+  passed. The manifest's sources name the region set and the day the
+  Registry was asked (`registry_pc_exons_<date>`, the UTC day of the earliest
+  `ENUMERATE` task) and each dataset's release (`clinvar_<date>`,
+  `gnomad_genomes_v<version>`); its `harvest_date` is the UTC day of the
+  earliest `ENUMERATE` or `LOOKUP` task. A task that `-resume` reuses keeps
+  the day it ran, so a resumed run's manifest is dated by the answers it
+  holds;
 - `genome/`: `GRCh38.bin` and its `.idx`, when the pipeline built them. The
   manifest then records the genome as `../genome/GRCh38.bin`, so keep the two
   directories side by side; a `--genome` you gave is recorded by its path and
@@ -597,9 +634,10 @@ there even when the gate stops a run.
 
 The first example above, run on 2026-10-24 at clingen `13824dd` with the
 image `clingen-index:0.1.0` (`123dd454650c`, built from `fe4adae`, whose
-`crates/`, `Cargo.lock` and `Dockerfile` are those of `13824dd`), on an
-Apple M6 (12 cores), 32 GB, macOS 27.0.1, with Docker 29.5.2 in a Colima
-VM of 6 CPUs and 12 GB. The ClinVar VCF is the 2026-10-19 one of
+`crates/`, `Cargo.lock` and `Dockerfile` are those of `13824dd`; `crates/`
+has changed since, so build the image from the branch head, which gives it
+another ID), on an Apple M6 (12 cores), 32 GB, macOS 27.0.1, with Docker
+29.5.2 in a Colima VM of 6 CPUs and 12 GB. The ClinVar VCF is the 2026-10-19 one of
 [ClinVar coverage](#clinvar-coverage), its md5
 `e649bbb1dfe11baafa9feab81a7a7cdd` checked against NCBI's `.md5`. The run
 took 13 min 28 s (`/usr/bin/time`: `real 807.96`) and ended with:
@@ -647,11 +685,17 @@ windows=169 requests=169 splits=0 alleles=2792299 reference=768762 no_grch38_hgv
 That is 669 requests, no answer full enough to split a window, 7,286,990
 alleles returned, 2,071,077 of them reference alleles left out (28%), and
 5,215,913 pairs written. Counted from the work files, 3,874 of those pairs
-are an allele that two windows' overlapping flanks both returned, which
-`KEYS` removes, leaving 5,212,039 distinct enumerated pairs. Of the 51,692
-registered ClinVar chr21 alleles, 51,544 were enumerated too; the other 148
-lie outside the windows or cross their edges and are in the index from the
-lookup alone. The cache answered 51,692 of the 51,713 ClinVar sites; the 21
+are written twice, each time by two adjacent windows of one batch, and
+`KEYS` removes the second copies, leaving 5,212,039 distinct enumerated
+pairs. Of the 3,874, 3,869 lie wholly in the 400 bp where the two windows'
+query spans overlap (core ± 200 bp flank). The other five end in that
+overlap but start before the second window's span, which returned them all
+the same: the deletions `NC_000021.9:g.44310291_44312789del`
+(`CA3268150738`) and `g.44311490_44312789del` (`CA3268150740`), and three
+indels at 46,254,003-46,254,006 (`CA2392578422`, `CA749836761`,
+`CA920321252`). Of the 51,692 registered ClinVar chr21 alleles, 51,544 were
+enumerated too; the other 148 lie outside the windows or cross their edges
+and are in the index from the lookup alone. The cache answered 51,692 of the 51,713 ClinVar sites; the 21
 it had no CA ID for were asked again, and are still unregistered
 (`LOOKUP`: `sites=21 requests=1 registered=0 unregistered=21 error=0 written=21`).
 
@@ -720,8 +764,10 @@ entry):
 }
 ```
 
-Task times from `pipeline_info/trace.txt` (every other task took under a
-second):
+Task times from the first run's `pipeline_info/trace.txt`, kept as
+`data/e2e_pipeline/run1/pipeline_info/trace.txt` (the one in
+`results/chr21/pipeline_info/` is the deletion rerun's, below); every other
+task took under a second:
 
 | Task | Duration | Peak RSS |
 |---|---:|---:|
@@ -750,7 +796,7 @@ Then the second `ENUMERATE` task's output (`enum_21_0001.tsv`) was deleted
 from its work directory and the command run with `-resume` again. Of the
 Registry tasks, only that one ran again (169 requests, 4m 47s), in a new
 work directory, as Nextflow does for a cached task whose output is gone.
-The five tasks that read its output (`KEYS`, `BUILD_INDEX`, `REACH`,
+The five tasks downstream of it (`KEYS`, `BUILD_INDEX`, `REACH`,
 `REPORT`, `FINALIZE`) ran again after it; the other nine, the first
 `ENUMERATE`, `LOOKUP` and `VALIDATE` among them, stayed cached:
 
@@ -761,7 +807,12 @@ The five tasks that read its output (`KEYS`, `BUILD_INDEX`, `REACH`,
 The new `enum_21_0001.tsv` is byte-identical to the deleted one (md5
 `dc1ceb4c667ac09527ca5f97d4d9b25e`), and so are the rebuilt `caid.fst` (md5
 `fee1e8364418752fb8f8fc2f2f1384ed`), `manifest.json` and every report. All
-three runs started on 2026-10-24, so the manifest kept its date.
+three runs started on 2026-10-24, so the manifest kept its date. That code
+dated the manifest by the day the run started, in the launcher's time zone
+(MDT here); the pipeline now dates it by the UTC day of its Registry tasks,
+which a `-resume` keeps for the tasks it reuses. These ran from 22:31 MDT on
+2026-10-24, already 2026-10-25 in UTC, so the same runs would now record
+`registry_pc_exons_2026-10-25` and a `harvest_date` of 2026-10-25.
 
 **End to end.** The 51,738 chr21 records of the ClinVar 2026-10-19 VCF,
 annotated offline by both tools with this index (vep-rs `b03dd5f`, fastVEP
@@ -821,16 +872,20 @@ drops the 23 with `ALT=.` before any plugin sees them, as in
 
 `--chrom all --regions pc_exons` is the run the spec plans: 60,328 windows
 over 406.7 Mb of protein-coding exons ±20 bp (430.8 Mb with the flanks), in
-133 batches of up to 500, so at least 60,328 region requests, one after
+132 batches of up to 500, so at least 60,328 region requests, one after
 another on the single `ENUMERATE` stream. It has not been run. The spec
 estimates about 31 hours from the cost per request; at chr21's measured
 1.18 s per request it would be nearer 20 hours, though chr21 need not be
 typical. Scaled from chr21 by window length, the index would hold about
 460 million keys in a `caid.fst` of about 4.8 GB (the spec estimated
-550 million and 6.5 GB). Run it with the SLURM or AWS Batch example above,
-or here with `-profile local --chrom all`; without `--genome` it builds the
-genome. `-resume` continues a stopped run from its first unfinished batch,
-and the launcher has to stay up for the whole run.
+550 million and 6.5 GB). Run it with the SLURM or AWS Batch example above;
+without `--genome` it builds the genome. A local run (`-profile local
+--chrom all`) is untested and needs more memory and disk than chr21: raise
+the local caps with `-c` ([Local resources](#regenerating-the-index-nextflow)),
+give Docker (or the Colima VM) the memory, and expect the work directory to
+hold tens of GB. `-resume` continues a stopped run by re-running only the
+tasks that did not finish, and the launcher has to stay up for the whole
+run.
 
 ### Limits
 
@@ -862,25 +917,35 @@ and the launcher has to stay up for the whole run.
   long stretches of a run. A run's length is set by the Registry, not by
   the hardware. The Registry is a free public service: contact ClinGen
   before enumerating more than the protein-coding exons.
-- **A `--genome` you supply must be a local or shared absolute path** that
-  the `BUILD_INDEX` task can open (the manifest records it, and `build`
-  checks it exists), so not an `s3://` URL: on AWS Batch leave it out and let
-  `BUILD_GENOME` build it.
-- **A `-resume` on a later day re-dates the manifest**: its
-  `registry_<set>_<date>` source and `harvest_date` take the day of the
-  latest start, although the cached `ENUMERATE` tasks keep their older
-  answers. `pipeline_info/trace.txt` has when each task really ran.
+- **A `--genome` you supply must be a local or shared path** that the
+  `BUILD_INDEX` task can open by the name the launcher gave it (the manifest
+  records it, and `build` checks it exists). An `s3://` URL, or any
+  `--genome` with an `s3://` work directory, is refused when the run starts:
+  on AWS Batch leave it out and let `BUILD_GENOME` build it.
+- **`-resume` continues one regeneration; a new one needs a fresh start.**
+  A resumed run reuses every finished task, the `latest` downloads and every
+  `ENUMERATE` batch included, so for newer ClinVar, gnomAD or UCSC data and
+  the alleles registered since, launch from a new directory or without
+  `-resume` (a new `-work-dir` alone still resumes from the old tasks).
+  Within one regeneration the manifest stays true: its
+  `registry_<set>_<date>` source is the UTC day of the earliest `ENUMERATE`
+  task and its `harvest_date` that of the earliest `ENUMERATE` or `LOOKUP`
+  task, and a reused task keeps its day. `pipeline_info/trace.txt` has when
+  each task was submitted.
 
 ### Tests
 
-`nf-test test` in `pipeline/` runs 92 tests offline (every process, and stub
-and real workflow runs against a mock Registry; 92 passed in 230 s on
-2026-10-24). `nf-test test tests-network/workflow_mt.nf.test` there runs the
+`nf-test test` in `pipeline/` runs 100 tests offline (every process, and stub
+and real workflow runs against a mock Registry; 100 passed in 259 s on
+2026-10-25). `nf-test test tests-network/workflow_mt.nf.test` there runs the
 workflow on chrM against the live Registry. `bash
 pipeline/tests/run_slurm_shim.sh` runs the `slurm` profile through
-`sbatch`/`squeue`/`scancel` shims that run the jobs locally, and `bash
-pipeline/tests/check_profiles.sh` checks what each profile resolves to. No
-real SLURM cluster or AWS account has run the pipeline.
+`sbatch`/`squeue`/`scancel` shims that run the jobs locally, and checks each
+job's partition and time limit; `bash pipeline/tests/check_profiles.sh`
+checks what each profile resolves to, and that a stub run of `-profile
+local,host` starts every task on a 16 GB, 2-CPU machine as the local
+executor sees one. No real SLURM cluster or AWS account has run the
+pipeline.
 
 ## chr21 index
 
@@ -986,10 +1051,14 @@ check](#end-to-end-check), with `index=data/index_corpus` and
 
 ## Known limitations
 
-- **chr21-only demo data.** The genome and index here cover chr21 alone. A
-  variant anywhere else (the toy's `melas`, on chrM) gets nothing and is
-  counted `unsupported`. Whole-genome use needs the full GRCh38 genome and a
-  harvest of every chromosome, built into one index.
+- **chr21-only demo data.** The genome and index of the demo cover chr21
+  alone. A variant anywhere else (the toy's `melas`, on chrM) gets nothing
+  and is counted `unsupported`. For every chromosome, the
+  [regeneration pipeline](#regenerating-the-index-nextflow) builds the
+  genome and one index with `--chrom all`; that run has not been made yet
+  ([The full exome run](#the-full-exome-run-not-run)), and
+  [ClinVar coverage](#clinvar-coverage) has a whole-genome binary and an
+  index of every ClinVar site plus the chr21 gnomAD harvest.
 - **`delins` and chrM rest on ClinVar alone.** The chr21 gnomAD harvest has
   no `delins` and no `m.` rows. ClinVar 2026-10-19 has 22,417 and 3,134, and
   every one matches the Registry ([ClinVar coverage](#clinvar-coverage)), but
@@ -1001,12 +1070,16 @@ check](#end-to-end-check), with `index=data/index_corpus` and
   flank that crosses a window edge, or longer than twice `--split-overlap`
   (2,000 bp) that crosses the midpoint of a split window, is not enumerated
   ([details](docs/registry-region-query.md)).
-- **`clingen-index build` holds every row in memory.** It keeps and sorts all
-  harvested (HGVS, CA ID) pairs in memory, about 68 bytes per row: the chr21
-  build (10,958,898 rows) peaks at about 0.75 GB resident
-  ([chr21 index](#chr21-index)). That is about 6.8 GB per 100 million rows,
-  so a whole-genome build needs an external sort first, which `build` does
-  not have yet.
+- **`clingen-index build --chunks` holds every row in memory.** It keeps and
+  sorts all harvested (HGVS, CA ID) pairs in memory, about 68 bytes per row:
+  the chr21 build (10,958,898 rows) peaks at about 0.75 GB resident
+  ([chr21 index](#chr21-index)), about 6.8 GB per 100 million rows. For a
+  large or whole-genome index use `build --sorted` instead, which streams
+  pairs already sorted by byte (`LC_ALL=C sort`) in constant memory: on the
+  15,528,839 pairs of [ClinVar coverage](#clinvar-coverage)'s index it peaked
+  at 17,104,896 bytes resident, against 1,045,839,872 for `--chunks`, and
+  wrote a byte-identical `caid.fst`. The regeneration pipeline sorts and
+  builds this way.
 - **Run `clingen-index validate` on every new harvest before building.** It
   is what checks that the HGVS `clingen-allele` computes matches the
   Registry's for that harvest; without it a mismatch shows up only as
