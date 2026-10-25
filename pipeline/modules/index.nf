@@ -547,8 +547,9 @@ process REPORT {
             sed 's/^/- /' gate.txt
             printf '\\n%s\\n' '${failedGate}'
         else
-            printf 'Gate: passed. Every validate row matched, every reach key was found again, and every\\n'
-            printf 'chromosome with windows enumerated alleles; FINALIZE publishes index/.\\n'
+            printf 'Gate: passed. Every validate row matched, every reach key that names a variant was found\\n'
+            printf 'again (reference and unparseable keys are only counted), and every chromosome with windows\\n'
+            printf 'enumerated alleles; FINALIZE publishes index/.\\n'
         fi
 
         printf '\\n## Per chromosome\\n\\n'

@@ -21,7 +21,10 @@ class MockRegistry implements Closeable {
     private final Map<String, List<String>> answers
 
     /**
-     * @param alleles     [HGVS, CAID] of the alleles the region query knows
+     * @param alleles     [HGVS, CAID] of the alleles the region query knows, or [HGVS, CAID,
+     *                    referenceAllele, allele] to give one coordinates too: the bases of the
+     *                    reference and of the allele, which tell enumerate that a delins putting
+     *                    back the reference's bases is a reference allele
      * @param harvestRows the 7 harvest columns (CHROM POS REF ALT CAID HGVS_GRCh38 HGVS_GRCh37) a
      *                    lookup answers with; an empty CAID is an allele nobody registered
      */
@@ -79,10 +82,13 @@ class MockRegistry implements Closeable {
     }
 
     private List region(String refseq, long begin, long end) {
-        return alleles.findAll { hgvs, ca ->
-            def m = hgvs =~ /^${java.util.regex.Pattern.quote(refseq)}:[gm]\.(\d+)/
+        return alleles.findAll { a ->
+            def m = a[0] =~ /^${java.util.regex.Pattern.quote(refseq)}:[gm]\.(\d+)/
             m.find() && (m.group(1) as long) > begin && (m.group(1) as long) <= end
-        }.collect { hgvs, ca -> allele("http://reg.genome.network/allele/${ca}", hgvs, '') }
+        }.collect { a ->
+            def coordinates = a.size() > 2 ? [[allele: a[3], referenceAllele: a[2]]] : []
+            allele("http://reg.genome.network/allele/${a[1]}", a[0], '', coordinates)
+        }
     }
 
     private List lookup(String vcf) {
@@ -97,8 +103,11 @@ class MockRegistry implements Closeable {
         }
     }
 
-    private static Map allele(String id, String grch38, String grch37) {
+    private static Map allele(String id, String grch38, String grch37, List coordinates = []) {
         def genomic = [[hgvs: [grch38], referenceGenome: 'GRCh38']]
+        if (coordinates) {
+            genomic[0].coordinates = coordinates
+        }
         if (grch37) {
             genomic << [hgvs: [grch37], referenceGenome: 'GRCh37']
         }

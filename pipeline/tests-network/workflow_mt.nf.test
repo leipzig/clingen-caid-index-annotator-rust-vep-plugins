@@ -14,7 +14,7 @@ nextflow_pipeline {
     script  "main.nf"
     tag     "network"
 
-    test("MT run against the live Registry reaches every key") {
+    test("MT run against the live Registry passes the publish gate") {
         when {
             params {
                 chrom       = "MT"
@@ -27,13 +27,32 @@ nextflow_pipeline {
         then {
             assert workflow.success
             def results = "${outputDir}/results"
+            assert path("${results}/reports/summary.md").text.contains('Gate: passed')
 
-            def reach = path("${results}/reports/reach_MT.txt").readLines()
-                .takeWhile { !it.startsWith('class\t') }.collectEntries { it.split('\t') as List }
+            def lines = path("${results}/reports/reach_MT.txt").readLines()
+            def reach = lines.takeWhile { !it.startsWith('class\t') }.collectEntries { it.split('\t') as List }
             assert (reach.keys as long) > 1000   // the Registry holds thousands of alleles in 2.7 kb of chrM
-            assert reach.reachable == reach.keys
-            ['wrong_ca', 'not_found', 'ref_mismatch', 'unsupported', 'reference', 'unparseable'].each {
+            // What the gate enforces: no key whose record finds another CA ID or none, names a REF
+            // the genome disagrees with, or is refused by the lookup. Every other key must be
+            // reachable, but for the two outcomes reach only counts: reference alleles, and keys no
+            // VCF record the lookup takes can name.
+            ['wrong_ca', 'not_found', 'ref_mismatch', 'unsupported'].each {
                 assert reach[it] == '0'
+            }
+            assert (reach.reachable as long) == (reach.keys as long) - (reach.reference as long) - (reach.unparseable as long)
+            // include_reference is off, so the index holds no reference allele: enumerate drops
+            // those written '=' and those written as a delins that puts back the reference's bases
+            // (13 in this window on 2026-10-24, e.g. m.3105_3106delinsAC). Stricter than the gate on
+            // purpose: it is the run's own contract.
+            assert reach.reference == '0'
+            // The unparseable keys here are the alleles at the N the rCRS keeps at 3107: m.3107N>A,
+            // C, G and T, and deletions spanning it (m.3107del, m.3089_3120del, m.3107_3152del),
+            // 7 on 2026-10-24. Any other kind showing up among the examples is worth a look.
+            def unparseable = lines.findAll { it.startsWith('unparseable: ') }
+            assert unparseable.size() == Math.min(5, reach.unparseable as int)   // reach shows 5 an outcome
+            unparseable.each {
+                assert it ==~ /unparseable: NC_012920\.1:m\.3107N>[ACGT] CA\d+ \(unsupported edit\)/ ||
+                    it.endsWith(' (reference sequence there is not ACGT)')
             }
 
             def coverage = path("${results}/reports/coverage.tsv").readLines()
@@ -46,7 +65,6 @@ nextflow_pipeline {
             assert manifest.sources == ["registry_genes_${java.time.LocalDate.now()}".toString(), 'clinvar_2026-10-19']
             assert manifest.genome == '../genome/GRCh38.bin'
             assert path("${results}/reports/validate_MT.txt").readLines().contains('m\t7\t7\t100.0')
-            assert path("${results}/reports/summary.md").text.contains('Gate: passed')
         }
     }
 }

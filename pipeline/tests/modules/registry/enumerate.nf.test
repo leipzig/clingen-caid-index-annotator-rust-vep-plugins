@@ -1,6 +1,7 @@
 // ENUMERATE against MockRegistry (tests/lib), a stand-in for the Registry on 127.0.0.1 that
 // knows the 58 registered alleles of tests/data/pairs_MT.tsv (real ClinVar MT alleles in the two
-// windows of regions_MT.bed) and one reference allele.
+// windows of regions_MT.bed) and two reference alleles: one written `=`, and one the Registry writes
+// as a delins that puts back the reference's bases, which only its coordinates give away.
 
 nextflow_process {
 
@@ -12,6 +13,8 @@ nextflow_process {
     def pairs = { String projectDir -> TestFiles.rows("${projectDir}/tests/data/pairs_MT.tsv") }
     // A made-up CA ID: reach counts reference keys without looking them up.
     def reference = ['NC_012920.1:m.3307A=', 'CA9000000001']
+    // Real (CA2499563283, chrM 3105-3106 is AC), coordinates as the live Registry gives them.
+    def noOpDelins = ['NC_012920.1:m.3105_3106delinsAC', 'CA2499563283', 'AC', 'AC']
 
     // The windows of regions_MT.bed, as REGIONS writes them.
     def windows = { String dir ->
@@ -24,7 +27,7 @@ nextflow_process {
     test("ENUMERATE writes every non-reference allele of its windows, one request each") {
         def registry
         when {
-            registry = new MockRegistry(pairs(projectDir) + [reference], [])
+            registry = new MockRegistry(pairs(projectDir) + [reference, noOpDelins], [])
             params {
                 registry_url = registry.url
             }
@@ -43,6 +46,7 @@ nextflow_process {
             assert new File(out).name == 'enum_MT_0000.tsv'
             // Written in the Registry's order; KEYS sorts.
             assert path(out).readLines().toSorted() == path("${projectDir}/tests/data/pairs_MT.tsv").readLines().toSorted()
+            assert !path(out).readLines().any { it.startsWith(noOpDelins[0] + '\t') }   // a reference allele
             assert registry.requests.size() == 2
             assert registry.requests[0].startsWith('GET /alleles?refseq=NC_012920.1&begin=2980&end=4600&')
             assert registry.requests[0].contains('limit=200000')
@@ -56,7 +60,7 @@ nextflow_process {
     test("ENUMERATE with keep_reference keeps reference alleles") {
         def registry
         when {
-            registry = new MockRegistry(pairs(projectDir) + [reference], [])
+            registry = new MockRegistry(pairs(projectDir) + [reference, noOpDelins], [])
             params {
                 registry_url = registry.url
             }
@@ -71,8 +75,9 @@ nextflow_process {
         then {
             assert process.success
             def lines = path(process.out.pairs[0][1]).readLines()
-            assert lines.size() == 59
+            assert lines.size() == 60
             assert lines.contains(reference.join('\t'))
+            assert lines.contains(noOpDelins[0..1].join('\t'))
         }
         cleanup {
             registry?.close()

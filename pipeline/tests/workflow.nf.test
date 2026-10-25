@@ -2,7 +2,8 @@
 // ClinVar from tests/data/clinvar_mini.vcf.gz (7 MT sites), the genome built from a UCSC mirror
 // laid out under the test's output directory (bigZips/hg38.fa.gz is chrM.fa.gz), and
 // MockRegistry (tests/lib) on 127.0.0.1 standing in for the Registry: it knows the 58 registered
-// alleles of tests/data/pairs_MT.tsv plus one reference allele, and answers lookups from
+// alleles of tests/data/pairs_MT.tsv plus two reference alleles (one written `=`, one a delins that
+// puts back the reference's bases, as the live Registry holds some), and answers lookups from
 // tests/data/harvest_MT.tsv. tests-network/workflow_mt.nf.test runs MT against the real Registry.
 
 nextflow_pipeline {
@@ -13,11 +14,13 @@ nextflow_pipeline {
 
     // A made-up CA ID: reach counts reference keys without looking them up.
     def reference = ['NC_012920.1:m.3307A=', 'CA9000000001']
+    // Real (CA2499563283, chrM 3105-3106 is AC): only its coordinates say it changes nothing.
+    def noOpDelins = ['NC_012920.1:m.3105_3106delinsAC', 'CA2499563283', 'AC', 'AC']
     def today = java.time.LocalDate.now().toString()
 
     // The registry and its alleles; withAlleles false gives a Registry whose region query finds nothing.
     def startRegistry = { String projectDir, boolean withAlleles ->
-        def pairs = withAlleles ? TestFiles.rows("${projectDir}/tests/data/pairs_MT.tsv") + [reference] : []
+        def pairs = withAlleles ? TestFiles.rows("${projectDir}/tests/data/pairs_MT.tsv") + [reference, noOpDelins] : []
         new MockRegistry(pairs, TestFiles.rows("${projectDir}/tests/data/harvest_MT.tsv"))
     }
 
@@ -114,14 +117,16 @@ nextflow_pipeline {
             def results = "${outputDir}/results"
             def manifest = new groovy.json.JsonSlurper().parse(new File("${results}/index/manifest.json"))
             assert manifest.sources == ["registry_bed_${today}".toString(), 'reference_alleles', 'clinvar_2026-10-19']
-            assert manifest.entries == 59
+            assert manifest.entries == 60
             def commands = enumerateCommands("${launchDir}/work")
             assert commands.size() == 1
             assert commands[0].contains('--keep-reference')
             def reach = reachCounts("${results}/reports/reach_MT.txt")
-            assert reach.keys == '59'
+            // reach counts both reference alleles as such: the delins too, from the genome's bases
+            assert reach.keys == '60'
             assert reach.reachable == '58'
-            assert reach.reference == '1'
+            assert reach.reference == '2'
+            assert reach.unsupported == '0'
             assert path("${results}/reports/summary.md").text.contains('Gate: passed')
         }
         cleanup {
