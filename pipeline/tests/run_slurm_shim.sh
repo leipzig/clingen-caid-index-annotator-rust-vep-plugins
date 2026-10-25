@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Runs the stub workflow with the slurm executor against fake sbatch, squeue and scancel
 # (pipeline/tests/slurm-shim/) that run each job on this machine, so Nextflow's SLURM calls,
-# its parsing of the job id, the routing of tasks to partitions and its detection of a
-# finished job are checked without a cluster.
+# its parsing of the job id, the routing of tasks to partitions, the time limit GNOMAD_SITES
+# asks for and its detection of a finished job are checked without a cluster.
 #
 #   bash pipeline/tests/run_slurm_shim.sh
 #
@@ -75,7 +75,8 @@ set -m
     cd "$scratch"
     exec nextflow run "$pipeline" -profile slurm,host -c "$here/slurm.config" -stub -ansi-log false \
         -work-dir "$scratch/work" \
-        --chrom MT --slurm_queue normal --network_queue transfer --outdir "$scratch/out"
+        --chrom MT --datasets clinvar,gnomad_genomes --slurm_queue normal --network_queue transfer \
+        --outdir "$scratch/out"
 ) < /dev/null > "$scratch/nextflow.out" 2>&1 &
 nf_pid=$!
 (
@@ -146,6 +147,7 @@ sorted=$(processes_with_label sort)
 
 seen_network=0
 seen_sort=0
+seen_gnomad=0
 while IFS=$'\t' read -r hash name; do
     process=${name%% *}      # "REGENERATE:FETCH_FASTA (MT)" is the task name
     process=${process##*:}
@@ -163,10 +165,23 @@ while IFS=$'\t' read -r hash name; do
     fi
     [[ $headers == "$expected" ]] ||
         fail "$name: expected the header \`$expected\` in .command.run, found: ${headers:-none}"
+    # Only GNOMAD_SITES asks for a time limit (conf/slurm.config); the rest take the partition's.
+    times=$(grep -E '^#SBATCH -t ' "$run_file" || true)
+    expected=''
+    if [[ $process == GNOMAD_SITES ]]; then
+        expected='#SBATCH -t 24:00:00'
+        seen_gnomad=$((seen_gnomad + 1))
+    fi
+    if [[ $times != "$expected" ]]; then
+        want=${expected:+the header \`$expected\`}
+        fail "$name: expected ${want:-no #SBATCH -t header} in .command.run, found: ${times:-none}"
+    fi
 done < <(awk -F'\t' -v h="$hash_col" -v n="$name_col" 'NR > 1 { print $h "\t" $n }' "$trace")
 ((seen_network > 0)) || fail "no task labelled network ran, so --network_queue was not exercised"
 ((seen_sort > 0)) || fail "no task labelled sort ran, so --slurm_queue was not exercised"
+((seen_gnomad > 0)) || fail "no GNOMAD_SITES task ran, so its time limit was not exercised"
 echo "ok   $seen_network network tasks have #SBATCH -p transfer, every other task (sort included) -p normal"
+echo "ok   $seen_gnomad GNOMAD_SITES task(s) have #SBATCH -t 24:00:00, no other task has a time limit"
 
 # No job outlives the run.
 for pid_file in "$FAKE_SLURM_DIR"/jobs/*/pid; do
