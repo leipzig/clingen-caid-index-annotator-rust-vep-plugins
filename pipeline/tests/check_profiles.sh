@@ -9,7 +9,9 @@
 # -c file do not reach the profiles, so the checks that need params include the profile's
 # conf/<profile>.config from a scratch config that sets them first. `nextflow config` does
 # not check option names either, so each profile is also parsed by `nextflow run -preview`
-# (no task runs), which warns about an unknown option.
+# (no task runs), which warns about an unknown option. Last, a stub run of -profile local,host
+# on a 16 GB, 2-CPU machine as the local executor sees one (executor.cpus and .memory) checks
+# that the local profile's resourceLimits let such a host start every task.
 set -euo pipefail
 
 pipeline=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -72,22 +74,31 @@ resolve local "$pipeline" local
 has   local "process.executor = 'local'"
 has   local "docker.enabled = true"
 has   local "process.container = 'clingen-index:0.1.0'"
+# A 16 GB, 2-CPU host must not refuse the sort label's 16 GB, 4-CPU tasks; ENUMERATE keeps 4 GB.
+has   local "process.resourceLimits.cpus = 2"
+has   local "process.resourceLimits.memory = '12 GB'"
+has   local "process.'withName:ENUMERATE'.memory = '4 GB'"
 
 resolve slurm "$pipeline" slurm
 has   slurm "process.executor = 'slurm'"
 has   slurm "apptainer.enabled = true"
 has   slurm "apptainer.autoMounts = true"
 has   slurm "process.container = 'docker://clingen-index:0.1.0'"
+has   slurm "process.'withName:GNOMAD_SITES'.time = '1d'"
+lacks slurm "resourceLimits"
 
 resolve awsbatch "$pipeline" awsbatch
 has   awsbatch "process.executor = 'awsbatch'"
 has   awsbatch "aws.region = 'us-east-1'"
+has   awsbatch "process.'withName:ENUMERATE'.memory = '4 GB'"
 lacks awsbatch "cliPath"
+lacks awsbatch "resourceLimits"
 
 resolve local_host "$pipeline" local,host
 has   local_host "process.executor = 'local'"
 has   local_host "process.container = null"
 has   local_host "docker.enabled = false"
+has   local_host "process.resourceLimits.memory = '12 GB'"
 lacks local_host "process.container = '"
 
 # slurm with partitions: network tasks go to --network_queue, or to --slurm_queue without it.
@@ -138,6 +149,20 @@ for profile in local slurm awsbatch local,host; do
         echo "ok   $profile: every config option is known"
     fi
 done
+
+# Without conf/local.config's resourceLimits the sort label's 4 CPUs and 16 GB stop this run at
+# MERGE_SITES: "Process requirement exceeds available CPUs -- req: 4; avail: 2".
+printf 'executor.cpus = 2\nexecutor.memory = 15.GB\n' > "$scratch/small_host.config"
+status=0
+(cd "$scratch" && nextflow run "$pipeline" -profile local,host -stub -ansi-log false -c small_host.config \
+    --chrom 21 --outdir "$scratch/small_host" > small_host.txt 2>&1) || status=$?
+if ((status != 0)); then
+    echo "FAIL local,host: a stub run on a 16 GB, 2-CPU host failed:" >&2
+    cat "$scratch/small_host.txt" >&2
+    failures=$((failures + 1))
+else
+    echo "ok   local,host: a stub run starts every task on a 16 GB, 2-CPU host"
+fi
 
 if ((failures > 0)); then
     echo "$failures profile check(s) failed" >&2
