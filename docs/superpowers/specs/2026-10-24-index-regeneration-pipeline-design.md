@@ -27,7 +27,7 @@ proves before publishing that the tools find every key of the index.
 
 ## Measured facts the design rests on
 
-- **Registry region query.** `GET https://reg.genome.network/alleles?refseq=<NC_…>&begin=<b>&end=<e>&fields=…&limit=<L>&skip=<S>`
+- **Registry region query.** `GET https://reg.genome.network/alleles?refseq=<NC_…>&begin=<b>&end=<e>&fields=…&limit=<L>` (it also takes `skip`, but paging with it loses alleles; see `docs/registry-region-query.md`)
   returns the canonical alleles lying wholly inside the window: start > `b`
   and end ≤ `e` (40 of 14,134 corpus alleles in sampled windows were absent,
   every one crossing a window edge). Without `limit` it returned all 57,093
@@ -133,8 +133,10 @@ with `rustls` for HTTPS, `flate2` for gzip) go into `clingen-index` only.
    and a summary of bases covered.
 5. **`registry enumerate --windows <TSV> --out <TSV>`** — queries each window
    (`fields=none+@id+genomicAlleles.hgvs+genomicAlleles.referenceGenome`),
-   pages with `limit=50000` and `skip` while a page is full, drops `=`
-   alleles, keeps the GRCh38 `NC_` HGVS, and writes `HGVS\tCAID`. Retries
+   asks once per window with a large `limit` and, when an answer is full,
+   splits the window into overlapping halves instead of paging with `skip`
+   (amended 2026-10-24: `skip` paging loses alleles on the live Registry; see
+   `docs/registry-region-query.md`), drops `=` alleles, keeps the GRCh38 `NC_` HGVS, and writes `HGVS\tCAID`. Retries
    network errors, 5xx and 429 with exponential backoff (6 attempts, 30 s
    doubling); any other 4xx fails.
 6. **`registry lookup --sites <TSV> --out <TSV> [--batch 250000]`** — the

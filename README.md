@@ -54,6 +54,7 @@ padded), but it has exactly one canonical HGVS, and so one CA ID.
 | chr21 conformance with the Registry | all 10,958,898 rows match the Registry's HGVS ([details](docs/known-differences.md)) |
 | ClinVar 2026-10-19, every chromosome | all 4,571,909 harvested rows match the Registry's HGVS, 22,417 `delins` and 3,134 chrM among them; both tools give the Registry's CA ID for all 4,595,314 registered ClinVar alleles ([ClinVar coverage](#clinvar-coverage)) |
 | End-to-end check, first 100,000 chr21 sites | both tools: all 100,000 CA IDs agree with the harvest ([below](#end-to-end-check)) |
+| Registry region enumeration (`clingen-index registry enumerate`) | **works**; it never pages with `skip`, which loses alleles on the live Registry ([Enumerating the Registry by region](#enumerating-the-registry-by-region)) |
 | Demo data | chr21 only, genome and index (see [Known limitations](#known-limitations)) |
 
 Design: [`docs/superpowers/specs/2026-10-23-clingen-allele-plugin-design.md`](docs/superpowers/specs/2026-10-23-clingen-allele-plugin-design.md).
@@ -435,6 +436,28 @@ python3 -I harvest/query_registry.py data/gnomad41_chr21_sites.tsv data/chr21_ch
 The Registry is a free public service. Please contact ClinGen before
 harvesting beyond gnomAD-scale site lists.
 
+## Enumerating the Registry by region
+
+A site list only finds the alleles you ask about. The Registry also answers
+`GET /alleles?refseq=<NC_…>&begin=<b>&end=<e>` with every allele it holds in
+a window, and `clingen-index registry enumerate` uses that to fill the index
+for gene and exome regions (windows from `clingen-index regions`). Measured
+against the live Registry on 2026-10-24
+([`docs/registry-region-query.md`](docs/registry-region-query.md)):
+
+- a window returns the alleles lying wholly inside `(begin, end]`, so
+  `regions` widens every window by a 200 bp flank;
+- each request costs about 0.71 s plus 0.10 ms per allele, so exons are
+  merged into windows of up to 50 kb (60,328 requests for protein-coding
+  exons ±20 bp, about 31 hours);
+- **paging with `limit`/`skip` silently loses alleles**: one 50 kb window in
+  APP, fetched in two pages, returned 13 of its 40,636 alleles twice and 13
+  others not at all, because the Registry's order shifts between requests.
+  `enumerate` never pages: it asks for each window once with a large limit
+  and, if the answer is full, splits the window into overlapping halves and
+  asks again. Fetched both ways, that window now gives the same 40,636
+  alleles.
+
 ## chr21 index
 
 Built on 2026-10-23 from the gnomAD v4.1 chr21 harvest, with the chr21-only
@@ -539,6 +562,11 @@ check](#end-to-end-check), with `index=data/index_corpus` and
   vareffect does not shift a `delins` 3′, so a harvest with `delins` ClinVar
   lacks could still differ; such a difference shows up as misses
   (`not_in_index`), not as wrong CA IDs. Validate every new harvest.
+- **Enumeration misses alleles that cross a window edge.** A window returns
+  only alleles lying wholly inside it, so an allele longer than the 200 bp
+  flank that crosses a window edge, or longer than twice `--split-overlap`
+  (2,000 bp) that crosses the midpoint of a split window, is not enumerated
+  ([details](docs/registry-region-query.md)).
 - **`clingen-index build` holds every row in memory.** It keeps and sorts all
   harvested (HGVS, CA ID) pairs in memory, about 68 bytes per row: the chr21
   build (10,958,898 rows) peaks at about 0.75 GB resident
@@ -604,6 +632,6 @@ crates/      clingen-allele (library) and clingen-index (CLI)
 harvest/     Registry harvester (Python, standard library only)
 scripts/     chr21 genome build, conformance sample, end-to-end cross-check
 examples/    toy VCF and lookup recipe
-docs/        design spec, implementation plan, known differences
+docs/        design specs, implementation plans, known differences, Registry region-query findings
 data/ logs/  harvest output, genome, index and run outputs (gitignored)
 ```
