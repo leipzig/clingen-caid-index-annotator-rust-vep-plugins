@@ -141,7 +141,7 @@ with `rustls` for HTTPS, `flate2` for gzip) go into `clingen-index` only.
    asks once per window with a large `limit` and, when an answer is full,
    splits the window into overlapping halves instead of paging with `skip`
    (amended 2026-10-24: `skip` paging loses alleles on the live Registry; see
-   `docs/registry-region-query.md`), drops `=` alleles, keeps the GRCh38 `NC_` HGVS, and writes `HGVS\tCAID`. Retries
+   `docs/registry-region-query.md`), drops reference alleles (`=`, or a `delins` whose coordinates' allele equals the reference allele) unless `--keep-reference`, keeps the GRCh38 `NC_` HGVS, and writes `HGVS\tCAID`. Retries
    network errors, 5xx and 429 with exponential backoff (6 attempts, 30 s
    doubling); any other 4xx fails.
 6. **`registry lookup --sites <TSV> --out <TSV> [--batch 250000]`** — the
@@ -176,7 +176,7 @@ docs/aws-batch.md          AWS Batch setup guide
 | `--regions` | `pc_exons` | `cds`, `pc_exons`, `exons`, `genes`, or a BED path |
 | `--pad`, `--merge_gap`, `--max_window`, `--flank` | 20, 5000, 50000, 200 | window construction |
 | `--datasets` | `clinvar` | any of `clinvar`, `gnomad_genomes`, `gnomad_exomes` |
-| `--include_reference` | false | also index the Registry's reference alleles (`…=`); off by default at the user's request |
+| `--include_reference` | false | also index the Registry's reference alleles (`…=`, and no-op `delins`); off by default at the user's request |
 | `--gnomad_version` | `latest` | or a pinned version such as `4.1.1` |
 | `--gnomad_mirror` | `gcs` | `gcs` or `aws` (AWS Open Data, us-east-1); md5s always from GCS metadata |
 | `--clinvar_vcf` | `latest` | or a local path, for an exact rerun |

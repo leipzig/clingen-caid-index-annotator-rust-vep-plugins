@@ -245,7 +245,7 @@ The user does not want reference calls (Registry `…=` alleles) in the index by
 - Modify: `docs/registry-region-query.md`, `README.md` (section "Enumerating the Registry by region")
 
 **Interfaces:**
-- `registry enumerate --keep-reference` (flag, default off): an allele whose HGVS on the window's accession ends in `=` is written like any other row. Without the flag it is dropped, as now. `reference=<n>` in the stderr tally counts reference alleles seen either way; `written=` includes them only when kept.
+- `registry enumerate --keep-reference` (flag, default off): an allele whose HGVS on the window's accession ends in `=` (or, amended by Ruling R12, whose `genomicAlleles.coordinates` all have `allele` equal to `referenceAllele`: a no-op `delins`) is written like any other row. Without the flag it is dropped, as now. `reference=<n>` in the stderr tally counts reference alleles seen either way; `written=` includes them only when kept.
 - Pipeline param `include_reference` (boolean, default `false`, in the schema's Registry group, shown by `--help`), converted once in `main.nf`'s settings to a real Boolean and passed to `ENUMERATE` as an input (`val keep_reference`); Task 11's ENUMERATE script adds `--keep-reference` when it is true and BUILD_INDEX adds the manifest source label `reference_alleles`.
 - `reach` needs no change: `…=` keys are already reported as `reference` and do not fail the run.
 

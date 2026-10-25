@@ -36,14 +36,17 @@ stretch (`{"start": 3104, "end": 3106, "allele": "AC", "referenceAllele":
   Registry also holds reference alleles as a `delins` that puts back the very
   bases it removes. On 2026-10-24 the window NC_012920.1 (3009, 5731] held 13,
   among them `NC_012920.1:m.3105_3106delinsAC` (`CA2499563283`, where the rCRS
-  reads `AC`) and `m.5131_5133delinsTAA`, mostly at ClinVar indel sites. Only
-  the coordinates give them away, their `allele` equal to their
-  `referenceAllele`, so `enumerate` asks for them and treats such an allele as
-  a reference allele whatever its HGVS. No annotation tool ever looks
-  one up, so `enumerate` drops them by default and only counts them
-  (`reference=` on stderr). `--keep-reference` writes them as ordinary
-  `HGVS<TAB>CAID` rows instead (`written=` then includes them), and the
-  pipeline's `--include_reference` sets it for a whole run.
+  reads `AC`) and `m.5131_5133delinsTAA`, mostly at ClinVar indel sites. The
+  50 kb APP window below held 1,369 (`reference=19769 written=39267` instead
+  of `reference=18400 written=40636`). The inserted bases of every one match
+  the chr21 reference, and none of the 15,528,839 CA IDs harvested from
+  ClinVar and gnomAD is among them. Only the coordinates give them away,
+  their `allele` equal to their `referenceAllele`, so `enumerate` asks for
+  them and treats such an allele as a reference allele whatever its HGVS. No
+  annotation tool ever looks one up, so `enumerate` drops them by default
+  and only counts them (`reference=` on stderr). `--keep-reference` writes
+  them as ordinary `HGVS<TAB>CAID` rows instead (`written=` then includes
+  them), and the pipeline's `--include_reference` sets it for a whole run.
 - **No hidden cap was seen.** A 50 kb window in APP returned all 57,093
   alleles in one request without `limit`, and 59,036 with `limit=200000`.
 
