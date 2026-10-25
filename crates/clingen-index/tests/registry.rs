@@ -165,52 +165,178 @@ impl Scratch {
     }
 }
 
+/// The request line of an `enumerate` request for `(begin, end]` on
+/// `NC_000021.9`, asking for at most `limit` alleles.
+fn enumerate_line(begin: u64, end: u64, limit: u64) -> String {
+    format!(
+        "GET /alleles?refseq=NC_000021.9&begin={begin}&end={end}&{ENUMERATE_FIELDS}&limit={limit} HTTP/1.1"
+    )
+}
+
+/// The request lines `server` received, in order.
+fn request_lines(server: &FakeRegistry) -> Vec<String> {
+    server.requests().into_iter().map(|r| r.line).collect()
+}
+
 #[test]
-fn enumerate_pages_until_a_short_page() {
+fn enumerate_splits_a_full_window() {
+    // `--page-size 3 --split-overlap 2`: the first answer is full, so it is
+    // dropped and (5030570, 5030590] is asked for again as (5030570, 5030582]
+    // and (5030578, 5030590], split at 5030580 and widened by 2 each way.
+    // CA2 lies in the overlap and comes back twice; it is written once.
     let server = FakeRegistry::start(vec![
-        (200, page(&[snv("CA1", 5030571), snv("CA2", 5030572)])),
-        (200, page(&[snv("CA3", 5030573), snv("CA4", 5030574)])),
-        (200, page(&[snv("CA5", 5030575)])),
+        (
+            200,
+            page(&[
+                snv("CA1", 5030571),
+                snv("CA2", 5030579),
+                snv("CA3", 5030585),
+            ]),
+        ),
+        (200, page(&[snv("CA1", 5030571), snv("CA2", 5030579)])),
+        (200, page(&[snv("CA2", 5030579), snv("CA3", 5030585)])),
     ]);
     let s = Scratch::new();
     let windows = s.windows("w.tsv", &[("21", "NC_000021.9", 5030570, 5030590)]);
-    let output = s.enumerate(&server, &[windows], &["--page-size", "2"]);
+    let output = s.enumerate(
+        &server,
+        &[windows],
+        &["--page-size", "3", "--split-overlap", "2"],
+    );
     assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
 
     assert_eq!(
         s.read("enum.tsv"),
         "NC_000021.9:g.5030571A>G\tCA1\n\
-         NC_000021.9:g.5030572A>G\tCA2\n\
-         NC_000021.9:g.5030573A>G\tCA3\n\
-         NC_000021.9:g.5030574A>G\tCA4\n\
-         NC_000021.9:g.5030575A>G\tCA5\n"
+         NC_000021.9:g.5030579A>G\tCA2\n\
+         NC_000021.9:g.5030585A>G\tCA3\n"
     );
     assert!(!partial(&s.path("enum.tsv")).exists());
     let requests = server.requests();
     let lines: Vec<&str> = requests.iter().map(|r| r.line.as_str()).collect();
-    let url = format!(
-        "GET /alleles?refseq=NC_000021.9&begin=5030570&end=5030590&{ENUMERATE_FIELDS}&limit=2"
-    );
     assert_eq!(
         lines,
         [
-            format!("{url}&skip=0 HTTP/1.1"),
-            format!("{url}&skip=2 HTTP/1.1"),
-            format!("{url}&skip=4 HTTP/1.1"),
+            enumerate_line(5030570, 5030590, 3),
+            enumerate_line(5030570, 5030582, 3),
+            enumerate_line(5030578, 5030590, 3),
         ]
     );
+    // The Registry's order is not stable from one request to the next, so
+    // `skip` would page through a moving list.
+    assert!(lines.iter().all(|line| !line.contains("skip")), "{lines:?}");
     let agent = format!("clingen-index/{}", env!("CARGO_PKG_VERSION"));
     assert!(
         requests
             .iter()
             .all(|r| r.header("user-agent") == Some(agent.as_str()))
     );
+    // The dropped answer's alleles are not counted, nor CA2's second coming.
     assert!(
-        stderr_of(&output)
-            .contains("windows=1 requests=3 alleles=5 reference=0 no_grch38_hgvs=0 written=5"),
+        stderr_of(&output).contains(
+            "windows=1 requests=3 splits=1 alleles=3 reference=0 no_grch38_hgvs=0 written=3"
+        ),
         "{}",
         stderr_of(&output)
     );
+}
+
+#[test]
+fn enumerate_splits_a_full_half_again_first_half_first() {
+    // `--page-size 2 --split-overlap 0`: (5030570, 5030590] is full and
+    // splits into (5030570, 5030580] and (5030580, 5030590]; the first half is
+    // full too and splits into (5030570, 5030575] and (5030575, 5030580],
+    // both asked for before the second half.
+    let full = page(&[snv("CA8", 5030571), snv("CA9", 5030589)]);
+    let server = FakeRegistry::start(vec![
+        (200, full.clone()),
+        (200, full),
+        (200, page(&[snv("CA1", 5030571)])),
+        (200, page(&[snv("CA2", 5030578)])),
+        (200, page(&[snv("CA3", 5030589)])),
+    ]);
+    let s = Scratch::new();
+    let windows = s.windows("w.tsv", &[("21", "NC_000021.9", 5030570, 5030590)]);
+    let output = s.enumerate(
+        &server,
+        &[windows],
+        &["--page-size", "2", "--split-overlap", "0"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+
+    assert_eq!(
+        s.read("enum.tsv"),
+        "NC_000021.9:g.5030571A>G\tCA1\n\
+         NC_000021.9:g.5030578A>G\tCA2\n\
+         NC_000021.9:g.5030589A>G\tCA3\n"
+    );
+    assert_eq!(
+        request_lines(&server),
+        [
+            enumerate_line(5030570, 5030590, 2),
+            enumerate_line(5030570, 5030580, 2),
+            enumerate_line(5030570, 5030575, 2),
+            enumerate_line(5030575, 5030580, 2),
+            enumerate_line(5030580, 5030590, 2),
+        ]
+    );
+    assert!(
+        stderr_of(&output).contains(
+            "windows=1 requests=5 splits=2 alleles=3 reference=0 no_grch38_hgvs=0 written=3"
+        ),
+        "{}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn enumerate_fails_when_a_full_window_cannot_shrink() {
+    // `--page-size 2 --split-overlap 10`. The first window is answered in
+    // full. The second, (6000000, 6000022], is 22 = 2 * 10 + 2 bases, so it
+    // still splits, into (6000000, 6000021] and (6000001, 6000022]; the first
+    // half, 21 = 2 * 10 + 1 bases, is full again and could only be split into
+    // halves no shorter than itself, so the run fails, leaving no output.
+    let full = page(&[snv("CA8", 6000005), snv("CA9", 6000015)]);
+    let server = FakeRegistry::start(vec![
+        (200, page(&[snv("CA1", 5030571)])),
+        (200, full.clone()),
+        (200, full),
+    ]);
+    let s = Scratch::new();
+    let windows = s.windows(
+        "w.tsv",
+        &[
+            ("21", "NC_000021.9", 5030570, 5030590),
+            ("21", "NC_000021.9", 6000000, 6000022),
+        ],
+    );
+    let output = s.enumerate(
+        &server,
+        std::slice::from_ref(&windows),
+        &["--page-size", "2", "--split-overlap", "10"],
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+
+    s.assert_absent("enum.tsv");
+    assert_eq!(
+        request_lines(&server),
+        [
+            enumerate_line(5030570, 5030590, 2),
+            enumerate_line(6000000, 6000022, 2),
+            enumerate_line(6000000, 6000021, 2),
+        ]
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains(&format!("{}:2", windows.display())),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("window NC_000021.9 6000000-6000022"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("6000000-6000021"), "{stderr}");
+    assert!(stderr.contains("--page-size 2"), "{stderr}");
 }
 
 #[test]
@@ -266,15 +392,16 @@ fn enumerate_keeps_only_the_windows_grch38_hgvs() {
         "NC_000021.9:g.5030578C>T\tCA749862939\nNC_000021.9:g.5030580del\tCA068622\n"
     );
     assert!(
-        stderr_of(&output)
-            .contains("windows=1 requests=1 alleles=4 reference=1 no_grch38_hgvs=1 written=2"),
+        stderr_of(&output).contains(
+            "windows=1 requests=1 splits=0 alleles=4 reference=1 no_grch38_hgvs=1 written=2"
+        ),
         "{}",
         stderr_of(&output)
     );
     let requests = server.requests();
     assert_eq!(requests.len(), 1);
     assert!(
-        requests[0].line.contains("&limit=50000&skip=0 "),
+        requests[0].line.contains("&limit=200000 HTTP/1.1"),
         "{}",
         requests[0].line
     );
@@ -307,8 +434,9 @@ fn enumerate_keeps_m_hgvs_on_chrM() {
             .starts_with("GET /alleles?refseq=NC_012920.1&begin=60&end=80&"),
     );
     assert!(
-        stderr_of(&output)
-            .contains("windows=1 requests=1 alleles=2 reference=1 no_grch38_hgvs=0 written=1"),
+        stderr_of(&output).contains(
+            "windows=1 requests=1 splits=0 alleles=2 reference=1 no_grch38_hgvs=0 written=1"
+        ),
         "{}",
         stderr_of(&output)
     );
@@ -341,7 +469,9 @@ fn enumerate_retries_429_and_503_then_succeeds() {
     assert!(stderr.contains("HTTP 429: slow down"), "{stderr}");
     assert!(stderr.contains("HTTP 503: busy"), "{stderr}");
     assert!(
-        stderr.contains("windows=2 requests=2 alleles=2 reference=0 no_grch38_hgvs=0 written=2"),
+        stderr.contains(
+            "windows=2 requests=2 splits=0 alleles=2 reference=0 no_grch38_hgvs=0 written=2"
+        ),
         "{stderr}"
     );
 }

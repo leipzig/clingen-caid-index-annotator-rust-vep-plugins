@@ -4,7 +4,7 @@
 //!
 //! - `enumerate` lists every allele the Registry holds inside each query
 //!   window that `regions` wrote (`GET /alleles?refseq=…&begin=…&end=…`),
-//!   paging with `limit` and `skip` while a page comes back full, and writes
+//!   splitting a window whose answer comes back full (below), and writes
 //!   `HGVS<TAB>CAID` for each allele's HGVS on the window's own GRCh38
 //!   accession. Reference alleles (`…=`) are left out: they name no change,
 //!   and no VCF record looks one up. The Registry returns the alleles whose
@@ -16,6 +16,28 @@
 //!   harvester chunk that `build --chunks` and `validate` read.
 //!
 //! Both only read. Neither ever sends `PUT`, which would register alleles.
+//!
+//! `enumerate` never pages with `skip`. The Registry does not list a span's
+//! alleles in a fixed order: one answer was not sorted by position (1,317
+//! places where the next allele starts before the one ahead of it), and
+//! alleles that tie come back in a different order from one request to the
+//! next. So `skip` steps through a list that moves under it. Measured on
+//! 2026-10-24 on NC_000021.9 (25906000, 25956000], two pages of 50,000 missed
+//! 13 of the 40,636 rows a single request returned and repeated 13 others.
+//! Instead, each span is asked for once with `limit` = `--page-size`. An
+//! answer holding fewer alleles is the whole span. An answer holding exactly
+//! `--page-size` may have been cut off at the limit, so it is dropped and the
+//! span `(b, e]` is asked for again as two halves split at
+//! `m = b + (e - b) / 2`: `(b, m + o]` and `(m - o, e]`, `o` being
+//! `--split-overlap`. A half that is full again is split again. An allele in
+//! the overlap comes back in both halves and is counted and written once. A
+//! full span of at most `2o + 1` bases cannot be split into two shorter halves,
+//! and ends the run with exit 2.
+//!
+//! The overlap is what keeps an allele lying across a split point. One that
+//! starts at or before `m - o` and ends after `m + o`, so more than `2o`
+//! bases long, is in neither half and is missed. This is the same limit as an
+//! allele longer than the flank that crosses a window edge (see `regions`).
 //!
 //! One agent makes every request of a run, one at a time, under the
 //! `User-Agent` `clingen-index/<version>`. A request that fails in a way that
@@ -31,7 +53,7 @@
 //! request has been answered, so a run that fails, or a workflow task that is
 //! retried, never leaves a file that looks complete but is not.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -54,7 +76,7 @@ const ATTEMPTS: u32 = 6;
 
 /// Largest body read, in bytes on the wire (the gzip the Registry sends is
 /// undone after this limit). ureq's own default of 10 MiB is below a full
-/// 50,000-allele page or a 250,000-site lookup.
+/// 200,000-allele answer or a 250,000-site lookup.
 const BODY_LIMIT: u64 = 1 << 30;
 
 /// Whole-request budget, from DNS to the last body byte. A 250,000-site
@@ -91,12 +113,15 @@ pub(crate) struct RegistryArgs {
 enum RegistryCommand {
     /// List every allele the Registry holds inside each query window.
     ///
-    /// Asks for each window of the --windows files in turn, page by page, and
-    /// writes `HGVS<TAB>CAID` for every allele with a non-reference HGVS on
-    /// the window's accession, in the order the Registry gave them. Prints
-    /// `windows requests alleles reference no_grch38_hgvs written` on stderr.
-    /// Exits 2 if a window line is malformed, a request fails, or an allele
-    /// to be written has no CA ID; nothing is written then.
+    /// Asks for each window of the --windows files in turn, splitting a
+    /// window whose answer holds --page-size alleles into two overlapping
+    /// halves (again and again if need be), and writes `HGVS<TAB>CAID` once
+    /// for every allele with a non-reference HGVS on the window's accession,
+    /// in the order the Registry gave them. Prints
+    /// `windows requests splits alleles reference no_grch38_hgvs written` on
+    /// stderr. Exits 2 if a window line is malformed, a request fails, an
+    /// allele to be written has no CA ID, or a span too short to split still
+    /// holds --page-size alleles; nothing is written then.
     Enumerate(EnumerateArgs),
     /// Look up the CA ID and HGVS of each site, as the Python harvester did.
     ///
@@ -132,15 +157,22 @@ struct EnumerateArgs {
     /// Output `HGVS<TAB>CAID` file, written as `<TSV>.partial` first.
     #[arg(long, value_name = "TSV")]
     out: PathBuf,
-    /// Alleles asked for per request; a page this full is followed by the
-    /// next.
+    /// Alleles asked for per request. An answer this full may be cut off, so
+    /// it is dropped and the span asked for in two halves. The default is
+    /// meant to answer a 50 kb window in one request, so splits stay rare
+    /// (NC_000021.9 25906000-25956000 held 59,036 alleles on 2026-10-24).
     #[arg(
         long,
         value_name = "N",
-        default_value_t = 50_000,
+        default_value_t = 200_000,
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     page_size: u64,
+    /// Bases each half of a split span reaches past the split point, so an
+    /// allele lying across the point is still wholly inside one half unless
+    /// it is more than twice this long.
+    #[arg(long, value_name = "N", default_value_t = 1000)]
+    split_overlap: u64,
     #[command(flatten)]
     client: ClientArgs,
 }
@@ -229,17 +261,17 @@ impl Client {
         }
     }
 
-    /// The page of at most `limit` alleles, after the first `skip`, that lie
-    /// inside `(begin, end]` on `refseq`.
-    fn enumerate_page(
+    /// At most `limit` of the alleles that lie inside `(begin, end]` on
+    /// `refseq`: all of them if fewer come back. No `skip` is sent; see the
+    /// module docs for why.
+    fn enumerate_span(
         &self,
         refseq: &str,
         begin: u64,
         end: u64,
         limit: u64,
-        skip: u64,
     ) -> Result<Vec<Allele>> {
-        let what = format!("GET {refseq} {begin}-{end} skip={skip}");
+        let what = format!("GET {refseq} {begin}-{end}");
         self.with_retries(&what, || {
             self.agent
                 .get(&self.alleles_url)
@@ -248,7 +280,6 @@ impl Client {
                 .query("end", end.to_string())
                 .query_raw("fields", ENUMERATE_FIELDS)
                 .query("limit", limit.to_string())
-                .query("skip", skip.to_string())
                 .call()
         })
     }
@@ -547,8 +578,13 @@ fn parse_window(line: &str) -> Result<(&'static str, u64, u64)> {
 /// What `enumerate` saw, for its stderr line.
 #[derive(Default)]
 struct EnumerateTally {
-    /// Pages answered; a retried request counts once.
+    /// Requests answered, the full answers that were dropped among them; a
+    /// retried request counts once.
     requests: u64,
+    /// Full answers dropped and their spans asked for in two halves.
+    splits: u64,
+    /// Distinct alleles of each window: one that two overlapping halves both
+    /// returned counts once.
     alleles: u64,
     /// Alleles whose HGVS on the window's accession ends in `=`.
     reference: u64,
@@ -573,46 +609,107 @@ fn window_hgvs<'a>(allele: &'a Allele, accession: &str) -> Option<&'a str> {
         })
 }
 
-/// Ask for every page of `window` and write its rows.
+/// The two halves a full span `(begin, end]` is asked for as instead: split
+/// at `mid = begin + (end - begin) / 2`, `(begin, min(end, mid + overlap)]`
+/// and `(max(begin, mid - overlap), end]`.
+///
+/// `None` when the span is at most `2 * overlap + 1` bases long, written here
+/// as `(end - begin) / 2 <= overlap` so a huge `--split-overlap` cannot
+/// overflow. A half would then be as long as the span itself, and splitting
+/// it again and again would never end. Past that bound both halves are
+/// strictly shorter than the span, and the `min` and `max` never bite.
+fn halves(begin: u64, end: u64, overlap: u64) -> Option<((u64, u64), (u64, u64))> {
+    let half = (end - begin) / 2;
+    if half <= overlap {
+        return None;
+    }
+    let mid = begin + half;
+    Some((
+        (begin, end.min(mid + overlap)),
+        (begin.max(mid - overlap), end),
+    ))
+}
+
+/// Ask for every allele of `window` and write its rows.
+///
+/// Each span is asked for once. A full answer is dropped and the span's two
+/// [`halves`] go on a stack, the first on top, so the halves are answered
+/// in span order and the rows come out in that order. An allele in the
+/// overlap of two halves comes back in both. `seen` keys each allele, a row by
+/// its HGVS and CA ID and any other allele by its HGVS (if any) and `@id`,
+/// so the repeat is neither counted nor written again.
 fn enumerate_window(
     client: &Client,
     window: &Window,
     page_size: u64,
+    overlap: u64,
     out: &mut AtomicFile,
     tally: &mut EnumerateTally,
 ) -> Result<()> {
-    let mut skip = 0;
-    loop {
-        let page =
-            client.enumerate_page(window.accession, window.begin, window.end, page_size, skip)?;
+    let mut spans = vec![(window.begin, window.end)];
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    while let Some((begin, end)) = spans.pop() {
+        let alleles = client.enumerate_span(window.accession, begin, end, page_size)?;
         tally.requests += 1;
-        let returned = page.len() as u64;
+        let returned = alleles.len() as u64;
+        // More than the limit means it was not applied, and then a full
+        // answer cannot be told from a complete one.
         ensure!(
             returned <= page_size,
-            "asked for at most {page_size} alleles, the Registry returned {returned}"
+            "GET {} {begin}-{end}: asked for at most {page_size} alleles, \
+             the Registry returned {returned}",
+            window.accession
         );
+        if returned == page_size {
+            let Some((first, second)) = halves(begin, end, overlap) else {
+                bail!(
+                    "window {} {}-{}: the span {begin}-{end} still returns a full \
+                     answer (--page-size {page_size}) and is too short to split with \
+                     --split-overlap {overlap}; raise --page-size",
+                    window.accession,
+                    window.begin,
+                    window.end
+                );
+            };
+            tally.splits += 1;
+            spans.push(second);
+            spans.push(first);
+            continue;
+        }
         let mut rows = String::new();
-        for allele in &page {
-            tally.alleles += 1;
-            match window_hgvs(allele, window.accession) {
-                None => tally.no_grch38_hgvs += 1,
-                Some(hgvs) if hgvs.ends_with('=') => tally.reference += 1,
-                Some(hgvs) => {
-                    let id = allele.id.as_deref().unwrap_or_default();
-                    let ca = ca_id(id)
+        for allele in &alleles {
+            let id = allele.id.as_deref().unwrap_or_default();
+            let hgvs = window_hgvs(allele, window.accession);
+            let ca = match hgvs {
+                Some(hgvs) if !hgvs.ends_with('=') => Some(
+                    ca_id(id)
                         .with_context(|| format!("allele {hgvs}"))?
-                        .ok_or_else(|| anyhow!("allele {hgvs} has no CA ID (@id {id:?})"))?;
+                        .ok_or_else(|| anyhow!("allele {hgvs} has no CA ID (@id {id:?})"))?,
+                ),
+                _ => None,
+            };
+            // A row's HGVS never ends in `=` and is never empty, so no row key
+            // equals the key of a reference allele or of one with no HGVS.
+            let key = (
+                hgvs.unwrap_or_default().to_owned(),
+                ca.unwrap_or(id).to_owned(),
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            tally.alleles += 1;
+            match (hgvs, ca) {
+                (None, _) => tally.no_grch38_hgvs += 1,
+                (Some(_), None) => tally.reference += 1,
+                (Some(hgvs), Some(ca)) => {
                     rows.push_str(&format!("{hgvs}\t{ca}\n"));
                     tally.written += 1;
                 }
             }
         }
         out.write(&rows)?;
-        if returned < page_size {
-            return Ok(());
-        }
-        skip += page_size;
     }
+    Ok(())
 }
 
 /// Run `registry enumerate`.
@@ -622,14 +719,22 @@ fn enumerate(args: EnumerateArgs) -> Result<ExitCode> {
     let mut out = AtomicFile::create(&args.out)?;
     let mut tally = EnumerateTally::default();
     for window in &windows {
-        enumerate_window(&client, window, args.page_size, &mut out, &mut tally)
-            .with_context(|| window.position.clone())?;
+        enumerate_window(
+            &client,
+            window,
+            args.page_size,
+            args.split_overlap,
+            &mut out,
+            &mut tally,
+        )
+        .with_context(|| window.position.clone())?;
     }
     out.commit()?;
     eprintln!(
-        "windows={} requests={} alleles={} reference={} no_grch38_hgvs={} written={}",
+        "windows={} requests={} splits={} alleles={} reference={} no_grch38_hgvs={} written={}",
         windows.len(),
         tally.requests,
+        tally.splits,
         tally.alleles,
         tally.reference,
         tally.no_grch38_hgvs,
@@ -862,6 +967,34 @@ mod tests {
             Some("NC_000021.9:g.5A>G")
         );
         assert_eq!(window_hgvs(&allele, "NC_000022.11"), None);
+    }
+
+    #[test]
+    fn halves_overlap_and_shrink_or_refuse() {
+        // Split at the midpoint, each half reaching `overlap` past it.
+        assert_eq!(
+            halves(25906000, 25956000, 1000),
+            Some(((25906000, 25932000), (25930000, 25956000)))
+        );
+        assert_eq!(halves(100, 120, 0), Some(((100, 110), (110, 120))));
+        // An odd length puts the extra base in the second half.
+        assert_eq!(halves(100, 121, 0), Some(((100, 110), (110, 121))));
+        assert_eq!(halves(100, 102, 0), Some(((100, 101), (101, 102))));
+        assert_eq!(halves(100, 101, 0), None);
+        // 2 * overlap + 2 bases still give two strictly shorter halves;
+        // 2 * overlap + 1 cannot.
+        assert_eq!(halves(0, 22, 10), Some(((0, 21), (1, 22))));
+        assert_eq!(halves(0, 21, 10), None);
+        assert_eq!(halves(0, 20, 10), None);
+        // An overlap too large to double does not overflow: the span's half
+        // is 2^63 - 1, one more than the overlap, so mid + overlap is
+        // 2^64 - 3.
+        assert_eq!(halves(0, u64::MAX, u64::MAX), None);
+        assert_eq!(halves(0, u64::MAX, u64::MAX / 2), None);
+        assert_eq!(
+            halves(0, u64::MAX, u64::MAX / 2 - 1),
+            Some(((0, u64::MAX - 2), (1, u64::MAX)))
+        );
     }
 
     #[test]
