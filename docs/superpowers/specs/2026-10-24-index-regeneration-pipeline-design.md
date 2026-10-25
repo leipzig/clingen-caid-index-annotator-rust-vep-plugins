@@ -73,7 +73,8 @@ pipeline (`curl`, `gunzip`, `awk`, `sort`, `gzip`, `openssl`).
 
 - **`registry`** (always on): `REGIONS` builds the region set and windows;
   `ENUMERATE` runs one batch of windows (one chromosome per batch) and emits
-  `HGVS\tCAID` for every non-reference allele. The windows are queried with
+  `HGVS\tCAID` for every non-reference allele (reference alleles, `…=`, only
+  with `--include_reference`; amended 2026-10-24 at the user's request). The windows are queried with
   200 bp flanks so alleles crossing a core interval's edge are kept;
   duplicates from overlapping flanks are removed by `KEYS`.
 - **`clinvar`** (default on): genome-wide, as in the ClinVar coverage run:
@@ -84,7 +85,9 @@ pipeline (`curl`, `gunzip`, `awk`, `sort`, `gzip`, `openssl`).
   gnomAD v4 has no chrM, so `MT` uses v3.1's chrM file. Inside the regions,
   enumeration already returns every gnomAD allele the Registry has.
 
-The index holds every enumerated non-reference allele plus every registered
+The index holds every enumerated non-reference allele (and reference alleles
+when `--include_reference` is set, recorded as the manifest source
+`reference_alleles`) plus every registered
 harvested row, for the requested chromosomes. Harvested rows also serve as
 the conformance set (`VALIDATE`).
 
@@ -171,6 +174,7 @@ docs/aws-batch.md          AWS Batch setup guide
 | `--regions` | `pc_exons` | `cds`, `pc_exons`, `exons`, `genes`, or a BED path |
 | `--pad`, `--merge_gap`, `--max_window`, `--flank` | 20, 5000, 50000, 200 | window construction |
 | `--datasets` | `clinvar` | any of `clinvar`, `gnomad_genomes`, `gnomad_exomes` |
+| `--include_reference` | false | also index the Registry's reference alleles (`…=`); off by default at the user's request |
 | `--gnomad_version` | `latest` | or a pinned version such as `4.1.1` |
 | `--gnomad_mirror` | `gcs` | `gcs` or `aws` (AWS Open Data, us-east-1); md5s always from GCS metadata |
 | `--clinvar_vcf` | `latest` | or a local path, for an exact rerun |
