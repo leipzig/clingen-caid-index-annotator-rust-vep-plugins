@@ -1,9 +1,10 @@
-# Keep the build context small: data/ alone is several GB, and none of this is built into the image.
-# Patterns are relative to the context root (data/ does not match crates/*/tests/data/).
-data/
-target/
-.git/
-pipeline/work/
-.nf-test/
-results/
-.superpowers/
+# Keep the build context to what the Dockerfile copies: Cargo.toml, Cargo.lock,
+# rust-toolchain.toml and crates/. An allowlist, because a denylist misses what a run
+# leaves behind: Docker anchors patterns at the context root, so `.nf-test/` does not match
+# pipeline/.nf-test/, and a run launched at the repo root writes work/ (GBs, tens of GBs for
+# --chrom all), .nextflow*, logs/ and results/ beside data/ and target/.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
