@@ -1,3 +1,8 @@
 /data/
 logs/
 target/
+.nf-test/
+.nf-test.log
+pipeline/work/
+.nextflow*
+results/

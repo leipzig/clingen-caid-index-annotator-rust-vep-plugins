@@ -1,0 +1,19 @@
+# Launcher stack for the regeneration pipeline: Nextflow, nf-test, and cfn-lint for the
+# AWS Batch template. The pipeline tasks themselves run in the clingen-index image.
+#
+#   micromamba create -y -p <prefix> -f pipeline/environment.yml
+#
+# micromamba does not activate the environment for you, and Java is not on PATH: it lives
+# at $PREFIX/lib/jvm. Set JAVA_HOME=$PREFIX/lib/jvm (or activate the environment) before
+# running nextflow or nf-test.
+#
+# Use strict channel priority, and no 'defaults' channel.
+name: clingen-index-pipeline
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - conda-forge::openjdk=21.0.10   # nextflow and nf-test need Java >=17,<26
+  - bioconda::nextflow=26.04.7
+  - bioconda::nf-test=0.9.5
+  - conda-forge::cfn-lint=1.57.2

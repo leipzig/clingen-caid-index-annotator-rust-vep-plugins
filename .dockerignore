@@ -1,0 +1,9 @@
+# Keep the build context small: data/ alone is several GB, and none of this is built into the image.
+# Patterns are relative to the context root (data/ does not match crates/*/tests/data/).
+data/
+target/
+.git/
+pipeline/work/
+.nf-test/
+results/
+.superpowers/
