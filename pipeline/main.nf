@@ -127,17 +127,36 @@ workflow REGENERATE {
         genomeToPublish = BUILD_GENOME.out.genome
     }
 
+    // The manifest's dates, from the UTC day each Registry task recorded: the registry source
+    // takes the earliest ENUMERATE task's, the harvest date the earliest ENUMERATE or LOOKUP
+    // task's. A task a -resume reuses keeps the day it ran, so a resumed run is dated by the
+    // answers it holds, not by its own start. One reduce gives both: min is deprecated since
+    // Nextflow 26.04, and reduce yields a value, which BUILD_INDEX needs to emit its index to
+    // every REACH task (combining two values would yield a one-item queue). There is always an
+    // ENUMERATE task (REGIONS writes at least one windows file), so registry is never null. A
+    // run stopped before any Registry task ended reduces to null, hence d?. below: such a run
+    // has already failed, and a null date would fail BUILD_INDEX's check by name.
+    def dates = ENUMERATE.out.day.map { d -> [registry: d, harvest: d] }
+        .mix(LOOKUP.out.day.map { d -> [registry: null, harvest: d] })
+        .reduce { a, b ->
+            [registry: [a.registry, b.registry].findAll { d -> d }.min(), harvest: [a.harvest, b.harvest].min()]
+        }
+
     // One byte-sorted key shard per chromosome, then the index, then the checks. The manifest
-    // records the sources (the region set and run date; the datasets' releases come from the
-    // provenance files) and the genome: a built one relative to the index, a given one by path.
+    // records the sources (the region set and the Registry's date; the datasets' releases come
+    // from the provenance files), the harvest date, and the genome: a built one relative to the
+    // index, a given one by path.
     KEYS(enumerated.join(COLLECT.out.harvest, failOnMismatch: true, failOnDuplicate: true)
         .map { chrom, enums, harvest -> [chrom, accession(chrom), enums, harvest] })
-    def manifest = [
-        set: run.windowing.set,
-        date: run.date,
-        reference: run.include_reference,
-        genome: run.genome ? run.genome[0].toString() : null,
-    ]
+    def manifest = dates.map { d ->
+        [
+            set: run.windowing.set,
+            registry_date: d?.registry,
+            harvest_date: d?.harvest,
+            reference: run.include_reference,
+            genome: run.genome ? run.genome[0].toString() : null,
+        ]
+    }
     BUILD_INDEX(KEYS.out.shard.toSortedList(), genome, provenance.toSortedList(), manifest)
     VALIDATE(COLLECT.out.harvest, genome)
     REACH(channel.fromList(chroms).map { c -> [c, accession(c)] }, BUILD_INDEX.out.index, genome)
@@ -155,15 +174,19 @@ workflow REGENERATE {
         REGIONS.out.summary,
         MERGE_SITES.out.counts.toSortedList(),
         statuses,
-        [
-            date: run.date,
-            chroms: chroms,
-            regions: run.bed ? run.bed.name : run.windowing.set,
-            windowing: run.windowing,
-            datasets: run.datasets,
-            include_reference: run.include_reference,
-            allow_mismatches: run.allow_mismatches,
-        ]
+        dates.map { d ->
+            [
+                date: run.date,
+                registry_date: d?.registry,
+                harvest_date: d?.harvest,
+                chroms: chroms,
+                regions: run.bed ? run.bed.name : run.windowing.set,
+                windowing: run.windowing,
+                datasets: run.datasets,
+                include_reference: run.include_reference,
+                allow_mismatches: run.allow_mismatches,
+            ]
+        }
     )
     FINALIZE(
         BUILD_INDEX.out.index,
@@ -225,8 +248,8 @@ def settings() {
 
     return [
         chroms: chromosomes(params.chrom.toString()),
-        // The run date, for the manifest's registry source and harvest date. A -resume on a later
-        // day builds the index again under the new date, though cached tasks are not rerun.
+        // The day the run started, for the heading of reports/summary.md. The manifest's dates
+        // are the days the Registry tasks ran, which a -resume keeps for the tasks it reuses.
         date: workflow.start.toLocalDate().toString(),
         bed: bed,
         windowing: [

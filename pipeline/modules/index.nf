@@ -235,8 +235,9 @@ process BUILD_INDEX {
     path shards, stageAs: 'shards/*'     // every <accession>.tsv; read in the byte order of their names
     tuple path(genome_bin, stageAs: 'genome/*'), path(genome_idx, stageAs: 'genome/*')
     path provenance, stageAs: 'provenance/*'   // ucsc_sources.tsv, clinvar_{date.txt,sources.tsv}, gnomad_files.tsv: for the sources
-    // [set: region set or 'bed', date: run date, reference: Boolean (--include_reference),
-    //  genome: absolute path of a --genome given, or null for the built one]
+    // [set: region set or 'bed', registry_date: the UTC day of the earliest ENUMERATE task,
+    //  harvest_date: of the earliest ENUMERATE or LOOKUP task, reference: Boolean
+    //  (--include_reference), genome: absolute path of a --genome given, or null for the built one]
     val manifest
 
     output:
@@ -247,6 +248,12 @@ process BUILD_INDEX {
     if (!(manifest.reference instanceof Boolean)) {
         error("BUILD_INDEX: reference must be a Boolean, not ${manifest.reference.getClass().simpleName} '${manifest.reference}'")
     }
+    // The dates go into a source label and --harvest-date as they are.
+    ['registry_date', 'harvest_date'].each { key ->
+        if (!(manifest[key].toString() ==~ /\d{4}-\d{2}-\d{2}/)) {
+            error("BUILD_INDEX: ${key} must be a YYYY-MM-DD day, not '${manifest[key]}'")
+        }
+    }
     // A built genome is recorded relative to the index (../genome/GRCh38.bin), as FINALIZE
     // publishes the two side by side; a --genome the user gave, by its own absolute path rather
     // than by the link staged in this work directory.
@@ -255,8 +262,9 @@ process BUILD_INDEX {
     # LC_ALL=C also orders the shards/*.tsv glob by byte: accession order, which is key order.
     export LC_ALL=C
 
-    # The manifest's sources: the Registry's region set and run date, then each dataset's release.
-    sources=(--source 'registry_${manifest.set}_${manifest.date}')
+    # The manifest's sources: the Registry's region set and the day it was asked, then each
+    # dataset's release.
+    sources=(--source 'registry_${manifest.set}_${manifest.registry_date}')
     ${manifest.reference ? 'sources+=(--source reference_alleles)' : ''}
     if [[ -e provenance/clinvar_date.txt ]]; then
         sources+=(--source "clinvar_\$(cat provenance/clinvar_date.txt)")
@@ -273,7 +281,7 @@ process BUILD_INDEX {
         while IFS= read -r label; do sources+=(--source "\$label"); done < gnomad_sources.txt
     fi
 
-    clingen-index build --sorted shards/*.tsv --out index "\${sources[@]}" --harvest-date ${manifest.date} ${genome}
+    clingen-index build --sorted shards/*.tsv --out index "\${sources[@]}" --harvest-date ${manifest.harvest_date} ${genome}
     """
 
     stub:
@@ -437,8 +445,9 @@ process REPORT {
     path regions_summary, stageAs: 'regions_summary.tsv'
     path counts, stageAs: 'counts/*'             // counts_<chrom>.tsv of MERGE_SITES
     val statuses                                 // as FINALIZE gets them
-    // [date:, chroms:, regions: set or BED file name, windowing:, datasets:, include_reference:,
-    //  allow_mismatches:]
+    // [date: the day the run started, registry_date:, harvest_date: (as BUILD_INDEX's manifest
+    //  gets them), chroms:, regions: set or BED file name, windowing:, datasets:,
+    //  include_reference:, allow_mismatches:]
     val info
 
     output:
@@ -540,6 +549,9 @@ process REPORT {
             '${regions}' ${w.pad} ${w.merge_gap} ${w.max_window} ${w.flank}
         printf -- '- Datasets: %s\\n' '${info.datasets.join(', ')}'
         printf -- '- Reference alleles: %s\\n' '${info.include_reference ? 'kept (--include_reference)' : 'left out'}'
+        printf -- '- Registry date: %s, the UTC day the earliest ENUMERATE task ran (manifest source registry_%s_%s)\\n' \\
+            '${info.registry_date}' '${w.set}' '${info.registry_date}'
+        printf -- '- Harvest date: %s, the UTC day the earliest ENUMERATE or LOOKUP task ran\\n' '${info.harvest_date}'
 
         printf '\\n## Gate\\n\\n'
         if [[ -s gate.txt ]]; then

@@ -16,6 +16,9 @@ nextflow_process {
     // Real (CA2499563283, chrM 3105-3106 is AC), coordinates as the live Registry gives them.
     def noOpDelins = ['NC_012920.1:m.3105_3106delinsAC', 'CA2499563283', 'AC', 'AC']
 
+    // The UTC day a task runs, which it records for the manifest's dates.
+    def today = { -> java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString() }
+
     // The windows of regions_MT.bed, as REGIONS writes them.
     def windows = { String dir ->
         TestFiles.write("${dir}/windows_MT_0000.tsv", [
@@ -51,6 +54,8 @@ nextflow_process {
             assert registry.requests[0].startsWith('GET /alleles?refseq=NC_012920.1&begin=2980&end=4600&')
             assert registry.requests[0].contains('limit=200000')
             assert registry.requests[1].startsWith('GET /alleles?refseq=NC_012920.1&begin=9205&end=9820&')
+            // the UTC day it asked the Registry, for the manifest's registry source
+            assert process.out.day == [today()]
         }
         cleanup {
             registry?.close()
@@ -116,6 +121,7 @@ nextflow_process {
         then {
             assert process.success
             assert new File(process.out.pairs[0][1]).name == 'enum_MT_0000.tsv'
+            assert process.out.day == [today()]
         }
     }
 }

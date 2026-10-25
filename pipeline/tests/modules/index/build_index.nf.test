@@ -50,7 +50,7 @@ nextflow_process {
                 input[0] = [file('${shard}')]
                 input[1] = BUILD_GENOME.out.genome
                 input[2] = []
-                input[3] = [set: 'bed', date: '2026-10-24', reference: false, genome: null]
+                input[3] = [set: 'bed', registry_date: '2026-10-24', harvest_date: '2026-10-24', reference: false, genome: null]
                 """
             }
         }
@@ -69,7 +69,7 @@ nextflow_process {
                 input[0] = [file('${mt}'), file('${chr21}')]
                 input[1] = BUILD_GENOME.out.genome
                 input[2] = ${provenance("${outputDir}/provenance")}
-                input[3] = [set: 'pc_exons', date: '2026-10-24', reference: false, genome: null]
+                input[3] = [set: 'pc_exons', registry_date: '2026-10-23', harvest_date: '2026-10-22', reference: false, genome: null]
                 """
             }
         }
@@ -78,11 +78,13 @@ nextflow_process {
             def index = process.out.index[0]
             assert new File("${index}/caid.fst").exists()
             def manifest = new groovy.json.JsonSlurper().parse(new File("${index}/manifest.json"))
+            // The two dates as the workflow took them from its Registry tasks: the source from
+            // the earliest ENUMERATE task, the harvest date from the earliest of every one.
             assert manifest.sources == [
-                'registry_pc_exons_2026-10-24', 'clinvar_2026-10-19',
+                'registry_pc_exons_2026-10-23', 'clinvar_2026-10-19',
                 'gnomad_exomes_v4.1.1', 'gnomad_genomes_v3.1', 'gnomad_genomes_v4.1.1',
             ]
-            assert manifest.harvest_date == '2026-10-24'
+            assert manifest.harvest_date == '2026-10-22'
             assert manifest.entries == 60
             // relative to the index directory, so FINALIZE's index/ and genome/ move together
             assert manifest.genome == '../genome/GRCh38.bin'
@@ -97,7 +99,7 @@ nextflow_process {
                 input[0] = [file('${mt}')]
                 input[1] = BUILD_GENOME.out.genome
                 input[2] = []
-                input[3] = BUILD_GENOME.out.genome.map { bin, _idx -> [set: 'bed', date: '2026-10-24', reference: true, genome: bin.toString()] }
+                input[3] = BUILD_GENOME.out.genome.map { bin, _idx -> [set: 'bed', registry_date: '2026-10-24', harvest_date: '2026-10-24', reference: true, genome: bin.toString()] }
                 """
             }
         }
@@ -123,13 +125,30 @@ nextflow_process {
                 input[0] = [file('${projectDir}/tests/data/pairs_MT.tsv')]
                 input[1] = BUILD_GENOME.out.genome
                 input[2] = []
-                input[3] = [set: 'bed', date: '2026-10-24', reference: 'false', genome: null]
+                input[3] = [set: 'bed', registry_date: '2026-10-24', harvest_date: '2026-10-24', reference: 'false', genome: null]
                 """
             }
         }
         then {
             assert process.failed
             assert (process.stdout + process.stderr).join('\n').contains("reference must be a Boolean, not String 'false'")
+        }
+    }
+
+    test("BUILD_INDEX refuses a manifest date that is not YYYY-MM-DD") {
+        when {
+            process {
+                """
+                input[0] = [file('${projectDir}/tests/data/pairs_MT.tsv')]
+                input[1] = BUILD_GENOME.out.genome
+                input[2] = []
+                input[3] = [set: 'bed', registry_date: '2026-10-24', harvest_date: '24/10/2026', reference: false, genome: null]
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).join('\n').contains("harvest_date must be a YYYY-MM-DD day, not '24/10/2026'")
         }
     }
 
@@ -141,7 +160,7 @@ nextflow_process {
                 input[0] = [file('${projectDir}/tests/data/pairs_MT.tsv')]
                 input[1] = BUILD_GENOME.out.genome
                 input[2] = []
-                input[3] = [set: 'bed', date: '2026-10-24', reference: false, genome: null]
+                input[3] = [set: 'bed', registry_date: '2026-10-24', harvest_date: '2026-10-24', reference: false, genome: null]
                 """
             }
         }

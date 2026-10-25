@@ -62,7 +62,10 @@ nextflow_pipeline {
             assert coverage.contains('MT\tharvest\tregistered\t7')
 
             def manifest = new groovy.json.JsonSlurper().parse(new File("${results}/index/manifest.json"))
-            assert manifest.sources == ["registry_genes_${java.time.LocalDate.now()}".toString(), 'clinvar_2026-10-19']
+            // the UTC day ENUMERATE asked the Registry, as it recorded it
+            def today = java.time.LocalDate.now(java.time.ZoneOffset.UTC)
+            assert manifest.sources == ["registry_genes_${today}".toString(), 'clinvar_2026-10-19']
+            assert manifest.harvest_date == today.toString()
             assert manifest.genome == '../genome/GRCh38.bin'
             assert path("${results}/reports/validate_MT.txt").readLines().contains('m\t7\t7\t100.0')
         }

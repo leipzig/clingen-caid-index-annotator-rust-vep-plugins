@@ -50,14 +50,19 @@ process ENUMERATE {
 
     output:
     tuple val(chrom), path("enum_${windows.baseName.replace('windows_', '')}.tsv"), emit: pairs   // HGVS<TAB>CAID
+    // The UTC day (YYYY-MM-DD) the task asked the Registry: the manifest's registry source takes
+    // the earliest. A cached task keeps the day it ran, so a -resume does not re-date its answers.
+    env('day'), emit: day
 
     script:
     // A String 'false' (the command line's, or a params file's) is true in a condition.
     if (!(keep_reference instanceof Boolean)) {
         error("ENUMERATE: keep_reference must be a Boolean, not ${keep_reference.getClass().simpleName} '${keep_reference}'")
     }
-    // enumerate writes <out>.partial and renames it once every window is in.
+    // enumerate writes <out>.partial and renames it once every window is in; day is taken only
+    // if it succeeds, as Nextflow reads env outputs after the script exits 0.
     """
+    day=\$(date -u +%F)
     clingen-index registry enumerate --windows ${windows} --out enum_${windows.baseName.replace('windows_', '')}.tsv \\
         --page-size ${paging.page_size} --split-overlap ${paging.split_overlap}${keep_reference ? ' --keep-reference' : ''} \\
         --base-url '${params.registry_url}'
@@ -65,6 +70,7 @@ process ENUMERATE {
 
     stub:
     """
+    day=\$(date -u +%F)
     : > enum_${windows.baseName.replace('windows_', '')}.tsv
     """
 }
@@ -81,16 +87,21 @@ process LOOKUP {
     output:
     // The 7 harvest columns: CHROM POS REF ALT CAID HGVS_GRCh38 HGVS_GRCh37
     tuple val(chrom), path("answers_${batch.baseName.replace('lookup_', '')}.tsv"), emit: answers
+    // The UTC day the task asked the Registry: the manifest's harvest date is the earliest day of
+    // every ENUMERATE and LOOKUP task, each kept as it ran when a -resume reuses the task.
+    env('day'), emit: day
 
     script:
     // lookup writes <out>.partial and renames it once every site is answered.
     """
+    day=\$(date -u +%F)
     clingen-index registry lookup --sites ${batch} --out answers_${batch.baseName.replace('lookup_', '')}.tsv \\
         --base-url '${params.registry_url}'
     """
 
     stub:
     """
+    day=\$(date -u +%F)
     : > answers_${batch.baseName.replace('lookup_', '')}.tsv
     """
 }

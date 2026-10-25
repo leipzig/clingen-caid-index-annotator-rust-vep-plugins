@@ -9,6 +9,9 @@ nextflow_process {
     process "LOOKUP"
     tag     "registry"
 
+    // The UTC day a task runs, which it records for the manifest's harvest date.
+    def today = { -> java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString() }
+
     test("LOOKUP writes the 7 harvest columns for every site") {
         def registry
         def picked
@@ -35,6 +38,7 @@ nextflow_process {
             assert picked.count { row -> row[4] == '' } == 1
             assert registry.requests.size() == 1
             assert registry.requests[0].startsWith('POST /alleles?file=vcf&')
+            assert process.out.day == [today()]
         }
         cleanup {
             registry?.close()
@@ -53,6 +57,7 @@ nextflow_process {
         then {
             assert process.success
             assert new File(process.out.answers[0][1]).name == 'answers_MT_0000.tsv'
+            assert process.out.day == [today()]
         }
     }
 }

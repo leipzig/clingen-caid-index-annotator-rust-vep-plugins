@@ -16,7 +16,8 @@ nextflow_pipeline {
     def reference = ['NC_012920.1:m.3307A=', 'CA9000000001']
     // Real (CA2499563283, chrM 3105-3106 is AC): only its coordinates say it changes nothing.
     def noOpDelins = ['NC_012920.1:m.3105_3106delinsAC', 'CA2499563283', 'AC', 'AC']
-    def today = java.time.LocalDate.now().toString()
+    // The UTC day the Registry tasks run, which they record for the manifest's dates.
+    def today = java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString()
 
     // The registry and its alleles; withAlleles false gives a Registry whose region query finds nothing.
     def startRegistry = { String projectDir, boolean withAlleles ->
@@ -128,6 +129,40 @@ nextflow_pipeline {
             assert reach.reference == '2'
             assert reach.unsupported == '0'
             assert path("${results}/reports/summary.md").text.contains('Gate: passed')
+        }
+        cleanup {
+            registry?.close()
+        }
+    }
+
+    // The manifest's dates come from the Registry tasks, not from the run's start: a task a -resume
+    // reuses keeps the day it ran. tests/fixed_dates.config has ENUMERATE run on 2026-10-03 and
+    // LOOKUP on 2026-10-01, so the source is ENUMERATE's day and the harvest date the earlier one.
+    test("MT run dates the manifest by the days its Registry tasks ran, not the run's") {
+        config "./fixed_dates.config"
+        def registry
+        when {
+            registry = startRegistry(projectDir, true)
+            params {
+                chrom        = "MT"
+                regions      = "${projectDir}/tests/data/regions_MT.bed"
+                clinvar_vcf  = "${projectDir}/tests/data/clinvar_mini.vcf.gz"
+                registry_url = registry.url
+                ucsc_base    = TestFiles.ucscMirror(projectDir, "${outputDir}/ucsc")
+                outdir       = "${outputDir}/results"
+            }
+        }
+        then {
+            assert workflow.success
+            def results = "${outputDir}/results"
+            assert !['2026-10-01', '2026-10-03'].contains(today)
+            def manifest = new groovy.json.JsonSlurper().parse(new File("${results}/index/manifest.json"))
+            assert manifest.sources == ['registry_bed_2026-10-03', 'clinvar_2026-10-19']
+            assert manifest.harvest_date == '2026-10-01'
+            def summary = path("${results}/reports/summary.md").text
+            assert summary.contains('- Registry date: 2026-10-03, the UTC day the earliest ENUMERATE task ran (manifest source registry_bed_2026-10-03)')
+            assert summary.contains('- Harvest date: 2026-10-01, the UTC day the earliest ENUMERATE or LOOKUP task ran')
+            assert summary.contains('Gate: passed')
         }
         cleanup {
             registry?.close()

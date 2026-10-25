@@ -62,7 +62,8 @@ nextflow_process {
     }
 
     def info = { boolean allow ->
-        "[date: '2026-10-24', chroms: ['MT'], regions: 'regions_MT.bed', datasets: ['clinvar', 'gnomad_genomes'], " +
+        "[date: '2026-10-24', registry_date: '2026-10-23', harvest_date: '2026-10-22', " +
+        "chroms: ['MT'], regions: 'regions_MT.bed', datasets: ['clinvar', 'gnomad_genomes'], " +
         "windowing: [set: 'bed', pad: 20, merge_gap: 5000, max_window: 50000, flank: 200, per_task: 500], " +
         "include_reference: false, allow_mismatches: ${allow}]"
     }
@@ -103,6 +104,11 @@ nextflow_process {
             assert TestFiles.lines(process.out.skipped[0]) == ['dataset\tCHROM\tPOS\tID\tREF\tALT\treason'] + skippedRows
 
             def summary = path(process.out.summary[0]).text
+            // the run's start in the heading, and the dates the manifest records, which come
+            // from the Registry tasks (a -resume keeps the day a reused task ran)
+            assert summary.startsWith('# CA-ID index regeneration, 2026-10-24\n')
+            assert summary.contains('- Registry date: 2026-10-23, the UTC day the earliest ENUMERATE task ran (manifest source registry_bed_2026-10-23)\n')
+            assert summary.contains('- Harvest date: 2026-10-22, the UTC day the earliest ENUMERATE or LOOKUP task ran\n')
             assert summary.contains('Chromosomes: MT')
             assert summary.contains('Gate: passed')
             assert summary.contains('| MT | 2 | 58 | 15 | 12 | 60 | 7 of 7 rows match | 60 of 60 keys reachable |')
