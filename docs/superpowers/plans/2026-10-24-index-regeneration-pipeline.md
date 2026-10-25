@@ -235,6 +235,26 @@ anything else (inv, con, ins(10), [n], ?, unknown accession, g./m. mismatch, S(.
 - [ ] **Step 5:** Full Rust gate passes.
 - [ ] **Step 6: Commit** `feat(clingen-index): registry enumerate and lookup clients`.
 
+### Task 7b: Optional reference alleles (added 2026-10-24 at the user's request, Ruling R9)
+
+The user does not want reference calls (Registry `…=` alleles) in the index by default, but wants them available as an option. `registry enumerate` already drops them; this task adds the opt-in.
+
+**Files:**
+- Modify: `crates/clingen-index/src/registry.rs`, `crates/clingen-index/tests/registry.rs`
+- Modify: `pipeline/nextflow.config`, `pipeline/nextflow_schema.json`, `pipeline/main.nf`, `pipeline/modules/registry.nf`, `pipeline/tests/main.nf.test`
+- Modify: `docs/registry-region-query.md`, `README.md` (section "Enumerating the Registry by region")
+
+**Interfaces:**
+- `registry enumerate --keep-reference` (flag, default off): an allele whose HGVS on the window's accession ends in `=` is written like any other row. Without the flag it is dropped, as now. `reference=<n>` in the stderr tally counts reference alleles seen either way; `written=` includes them only when kept.
+- Pipeline param `include_reference` (boolean, default `false`, in the schema's Registry group, shown by `--help`), converted once in `main.nf`'s settings to a real Boolean and passed to `ENUMERATE` as an input (`val keep_reference`); Task 11's ENUMERATE script adds `--keep-reference` when it is true and BUILD_INDEX adds the manifest source label `reference_alleles`.
+- `reach` needs no change: `…=` keys are already reported as `reference` and do not fail the run.
+
+- [ ] **Step 1: Write failing tests**: `enumerate_keeps_reference_alleles_when_asked` in `tests/registry.rs` (fake server: one allele whose only GRCh38 HGVS is `NC_000021.9:g.5030577G=` with `@id` `…/allele/CA2375273242`, plus one non-reference allele → without the flag one row and `reference=1`; with `--keep-reference` both rows, the reference one exactly `NC_000021.9:g.5030577G=\tCA2375273242`); in `pipeline/tests/main.nf.test`: `help lists include_reference`, `include_reference true is accepted` (stub run succeeds), `include_reference maybe fails` (not a boolean).
+- [ ] **Step 2:** Run them → FAIL.
+- [ ] **Step 3: Implement**; update `docs/registry-region-query.md` ("`enumerate` drops them" → by default, `--keep-reference` keeps them) and the README section's bullet list.
+- [ ] **Step 4:** Full Rust gate and `nf-test test` pass.
+- [ ] **Step 5: Commit** `feat: optional reference alleles in the index (registry enumerate --keep-reference, --include_reference)`.
+
 ### Task 8: Requirements, Dockerfile, ignore files
 
 **Files:**
