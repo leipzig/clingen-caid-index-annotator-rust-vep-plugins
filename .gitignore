@@ -6,3 +6,4 @@ target/
 pipeline/work/
 .nextflow*
 results/
+/work/

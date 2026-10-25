@@ -1,0 +1,184 @@
+nextflow_pipeline {
+
+    name    "pipeline: parameters and stubbed workflow"
+    script  "main.nf"
+    tag     "pipeline"
+    options "-stub"
+
+    // nf-test runs Nextflow with -quiet, so the parameter summary (log.info) is read from the
+    // run's log, meta/nextflow.log, not from stdout.
+
+    // Every process of the pipeline, so a stub run can be checked to reach all of them.
+    def allProcesses = [
+        'FETCH_UCSC', 'REGIONS', 'ENUMERATE',
+        'RESOLVE_GNOMAD', 'GNOMAD_SITES', 'CLINVAR_SITES', 'SPLIT_CACHE', 'MERGE_SITES', 'LOOKUP', 'COLLECT',
+        'FETCH_FASTA', 'BUILD_GENOME', 'KEYS', 'BUILD_INDEX', 'VALIDATE', 'REACH', 'FINALIZE', 'REPORT',
+    ]
+
+    test("help prints the parameters") {
+        when {
+            params {
+                help = true
+            }
+        }
+        then {
+            def out = workflow.stdout.join('\n')
+            assert workflow.success
+            assert out.contains('--chrom')
+            assert out.contains('--regions')
+            assert workflow.trace.tasks().size() == 0
+        }
+    }
+
+    test("missing chrom fails") {
+        when {
+            params {
+                outdir = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.failed
+            assert (workflow.stdout + workflow.stderr).join('\n').contains('Missing required parameter(s): chrom')
+        }
+    }
+
+    test("chrom 23 fails") {
+        when {
+            params {
+                chrom  = "23"
+                outdir = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.failed
+            assert (workflow.stdout + workflow.stderr).join('\n').contains('--chrom (23)')
+        }
+    }
+
+    test("chrom chrUn fails") {
+        when {
+            params {
+                chrom  = "chrUn"
+                outdir = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.failed
+            assert (workflow.stdout + workflow.stderr).join('\n').contains('--chrom (chrUn)')
+        }
+    }
+
+    test("chrom M fails") {
+        // UCSC writes chrM and Ensembl MT; a bare M is neither, so it is refused.
+        when {
+            params {
+                chrom  = "M"
+                outdir = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.failed
+            assert (workflow.stdout + workflow.stderr).join('\n').contains('--chrom (M)')
+        }
+    }
+
+    test("unknown param fails") {
+        when {
+            params {
+                chrom  = "21"
+                foo    = "x"
+                outdir = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.failed
+            assert (workflow.stdout + workflow.stderr).join('\n').contains('--foo')
+        }
+    }
+
+    test("chrom chrM is accepted") {
+        when {
+            params {
+                chrom  = "chrM"
+                outdir = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.success
+            assert path("$launchDir/meta/nextflow.log").readLines().any { it ==~ /chromosomes\s*: MT/ }
+            assert workflow.trace.tasks().any { it.name ==~ /.*ENUMERATE \(windows_MT_0000\)/ }
+        }
+    }
+
+    // The other accepted forms, each run as the bare GRCh38 name the tasks see. A params-file
+    // integer (chrom = 21) arrives typed, unlike the command line's String.
+    [chr21: '21', X: 'X', chrX: 'X', MT: 'MT', 21: '21'].each { form, bare ->
+        test("chrom ${form} (${form.getClass().simpleName}) is accepted as ${bare}") {
+            when {
+                params {
+                    chrom  = form
+                    outdir = "$outputDir"
+                }
+            }
+            then {
+                assert workflow.success
+                assert path("$launchDir/meta/nextflow.log").readLines().any { it ==~ /chromosomes\s*: ${bare}/ }
+                assert workflow.trace.tasks().any { it.name ==~ /.*ENUMERATE \(windows_${bare}_0000\)/ }
+            }
+        }
+    }
+
+    test("stub: chrom 21 runs every process once and publishes") {
+        when {
+            params {
+                chrom    = "21"
+                datasets = "clinvar,gnomad_genomes,gnomad_exomes"
+                cache    = "${projectDir}/tests/data/cache"
+                outdir   = "$outputDir"
+            }
+        }
+        then {
+            def counts = workflow.trace.tasks().countBy { it.name.tokenize(' ')[0].tokenize(':')[-1] }
+            def expected = allProcesses.collectEntries { [it, 1] } + [GNOMAD_SITES: 2]
+            assert workflow.success
+            assert path("$launchDir/meta/nextflow.log").readLines().any { it ==~ /chromosomes\s*: 21/ }
+            assert counts == expected
+            assert path("$outputDir/index/caid.fst").exists()
+            assert path("$outputDir/index/manifest.json").exists()
+            assert path("$outputDir/genome/GRCh38.bin").exists()
+            assert path("$outputDir/genome/GRCh38.bin.idx").exists()
+            assert path("$outputDir/harvest/21.tsv.gz").exists()
+            ['coverage.tsv', 'summary.md', 'sources.tsv', 'skipped.tsv.gz', 'validate_21.txt', 'reach_21.txt'].each {
+                assert path("$outputDir/reports/$it").exists()
+            }
+            // trace.txt too in a real run; nf-test's own -with-trace moves it to meta/trace.csv.
+            ['report.html', 'timeline.html'].each {
+                assert path("$outputDir/pipeline_info/$it").exists()
+            }
+        }
+    }
+
+    test("stub: chrom all runs the per-chromosome processes for 25 chromosomes") {
+        when {
+            params {
+                chrom    = "all"
+                datasets = "clinvar,gnomad_genomes,gnomad_exomes"
+                cache    = "${projectDir}/tests/data/cache"
+                outdir   = "$outputDir"
+            }
+        }
+        then {
+            def counts = workflow.trace.tasks().countBy { it.name.tokenize(' ')[0].tokenize(':')[-1] }
+            def perChrom = ['ENUMERATE', 'MERGE_SITES', 'LOOKUP', 'COLLECT', 'KEYS', 'VALIDATE', 'REACH']
+            // gnomAD v4 has no chrM: MT streams v3.1 genomes and no exomes.
+            def expected = allProcesses.collectEntries { [it, 1] } +
+                perChrom.collectEntries { [it, 25] } + [GNOMAD_SITES: 49]
+            assert workflow.success
+            assert path("$launchDir/meta/nextflow.log").readLines().any { it ==~ /chromosomes\s*: 1,2,3,.*,22,X,Y,MT/ }
+            assert counts == expected
+            assert path("$outputDir/harvest/MT.tsv.gz").exists()
+            assert path("$outputDir/reports/reach_X.txt").exists()
+            assert path("$outputDir/index/caid.fst").exists()
+        }
+    }
+}

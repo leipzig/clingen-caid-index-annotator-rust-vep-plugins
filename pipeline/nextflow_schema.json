@@ -1,0 +1,237 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://example.invalid/clingen/pipeline/nextflow_schema.json",
+    "title": "clingen index regeneration pipeline parameters",
+    "description": "Regenerates the ClinGen CA-ID index (caid.fst + manifest.json) from Registry region enumeration, ClinVar and optionally gnomAD, and proves every key reachable before publishing.",
+    "type": "object",
+    "$defs": {
+        "input_options": {
+            "title": "Input options",
+            "type": "object",
+            "description": "What to regenerate, and from which sources.",
+            "required": ["chrom"],
+            "properties": {
+                "chrom": {
+                    "type": ["string", "integer"],
+                    "description": "Chromosome: 1-22, X, Y, MT (a chr prefix is accepted, and chrM) or all.",
+                    "help_text": "Narrows every source: windows, ClinVar, gnomAD, the genome and the index. A bare number reaches validation as an integer, hence the integer range.",
+                    "pattern": "^((chr)?([1-9]|1[0-9]|2[0-2]|X|Y|MT)|chrM|all)$",
+                    "minimum": 1,
+                    "maximum": 22,
+                    "errorMessage": "Use 1-22, X, Y, MT (a chr prefix is accepted, and chrM) or all."
+                },
+                "regions": {
+                    "type": "string",
+                    "description": "Region set to enumerate: cds, pc_exons, exons, genes, or a BED file.",
+                    "help_text": "The sets are cut from the UCSC ncbiRefSeq and knownGene tables (RefSeq and GENCODE): cds = coding sequence, pc_exons = whole exons of coding transcripts, exons = all exons, genes = whole transcripts.",
+                    "default": "pc_exons",
+                    "pattern": "^(cds|pc_exons|exons|genes|\\S+\\.bed(\\.gz)?)$"
+                },
+                "datasets": {
+                    "type": "string",
+                    "description": "Comma-separated datasets whose sites are looked up: clinvar, gnomad_genomes, gnomad_exomes.",
+                    "default": "clinvar",
+                    "pattern": "^(clinvar|gnomad_genomes|gnomad_exomes)(,(clinvar|gnomad_genomes|gnomad_exomes))*$"
+                },
+                "gnomad_version": {
+                    "type": ["string", "number"],
+                    "description": "gnomAD release: latest, or a version such as 4.1.1.",
+                    "help_text": "MT always uses v3.1's chrM file, as gnomAD v4 has no chrM.",
+                    "default": "latest",
+                    "pattern": "^(latest|\\d+\\.\\d+(\\.\\d+)?)$"
+                },
+                "gnomad_mirror": {
+                    "type": "string",
+                    "description": "Where gnomAD is streamed from: gcs, or aws (AWS Open Data, us-east-1). The md5s always come from GCS.",
+                    "default": "gcs",
+                    "enum": ["gcs", "aws"]
+                },
+                "clinvar_vcf": {
+                    "type": "string",
+                    "description": "latest (NCBI's weekly clinvar.vcf.gz), or a local clinvar.vcf.gz, with its .md5 beside it, for an exact rerun.",
+                    "default": "latest",
+                    "pattern": "^(latest|\\S+\\.vcf\\.gz)$"
+                },
+                "genome": {
+                    "type": "string",
+                    "format": "file-path",
+                    "exists": true,
+                    "description": "Prebuilt vareffect genome (GRCh38.bin, with its .idx beside it); built from UCSC hg38.fa.gz when not given."
+                },
+                "cache": {
+                    "type": "string",
+                    "description": "Comma-separated earlier harvest directories; their registered answers are reused instead of asked again."
+                }
+            }
+        },
+        "window_options": {
+            "title": "Window options",
+            "type": "object",
+            "description": "How the region set is cut into Registry query windows.",
+            "properties": {
+                "pad": {
+                    "type": "integer",
+                    "description": "Bases added to both ends of each region.",
+                    "default": 20,
+                    "minimum": 0
+                },
+                "merge_gap": {
+                    "type": "integer",
+                    "description": "Regions no further apart than this are merged into one window.",
+                    "default": 5000,
+                    "minimum": 0
+                },
+                "max_window": {
+                    "type": "integer",
+                    "description": "Longest window core; a longer merged region is cut into equal parts.",
+                    "default": 50000,
+                    "minimum": 1
+                },
+                "flank": {
+                    "type": "integer",
+                    "description": "Bases added to both ends of a window's core when querying, so alleles crossing its edge are returned.",
+                    "default": 200,
+                    "minimum": 0
+                }
+            }
+        },
+        "task_options": {
+            "title": "Task sizes",
+            "type": "object",
+            "description": "How much work each task does.",
+            "properties": {
+                "windows_per_task": {
+                    "type": "integer",
+                    "description": "Windows enumerated by one task.",
+                    "default": 500,
+                    "minimum": 1
+                },
+                "batch_size": {
+                    "type": "integer",
+                    "description": "Sites looked up by one task.",
+                    "default": 2000000,
+                    "minimum": 1
+                },
+                "page_size": {
+                    "type": "integer",
+                    "description": "Alleles asked for per Registry request; a window answered this full is split in two and asked again.",
+                    "default": 200000,
+                    "minimum": 1,
+                    "hidden": true
+                },
+                "split_overlap": {
+                    "type": "integer",
+                    "description": "Bases each half of a split window reaches past the split point.",
+                    "default": 1000,
+                    "minimum": 0,
+                    "hidden": true
+                }
+            }
+        },
+        "output_options": {
+            "title": "Output options",
+            "type": "object",
+            "properties": {
+                "outdir": {
+                    "type": "string",
+                    "description": "Local path or s3:// URI for the results.",
+                    "help_text": "A plain string: an s3:// URI is not probed while the parameters are checked.",
+                    "default": "results"
+                },
+                "allow_mismatches": {
+                    "type": "boolean",
+                    "description": "Publish the index even when validate or reach fails.",
+                    "default": false
+                }
+            }
+        },
+        "infrastructure_options": {
+            "title": "Infrastructure options",
+            "type": "object",
+            "description": "Where tasks run; read by the local, slurm and awsbatch profiles.",
+            "properties": {
+                "container": {
+                    "type": "string",
+                    "description": "Task image.",
+                    "help_text": "slurm: a registry name is pulled as docker://<name>; an absolute path is used as an Apptainer image file. awsbatch: the image in ECR.",
+                    "default": "clingen-index:0.1.0"
+                },
+                "slurm_queue": {
+                    "type": "string",
+                    "description": "SLURM partition for every task."
+                },
+                "network_queue": {
+                    "type": "string",
+                    "description": "SLURM partition for downloads and Registry calls (the network label), if not --slurm_queue."
+                },
+                "aws_queue": {
+                    "type": "string",
+                    "description": "AWS Batch job queue (name or ARN)."
+                },
+                "aws_region": {
+                    "type": "string",
+                    "description": "AWS region of the Batch queue and the S3 bucket.",
+                    "default": "us-east-1"
+                }
+            }
+        },
+        "endpoint_options": {
+            "title": "Endpoints",
+            "type": "object",
+            "description": "Services the pipeline reads from.",
+            "properties": {
+                "registry_url": {
+                    "type": "string",
+                    "description": "ClinGen Allele Registry base URL.",
+                    "default": "https://reg.genome.network",
+                    "pattern": "^(https?|file)://\\S+$",
+                    "hidden": true
+                },
+                "gnomad_listing_url": {
+                    "type": "string",
+                    "description": "GCS JSON API listing of the gnomAD bucket (object names, sizes and md5s).",
+                    "default": "https://storage.googleapis.com/storage/v1/b/gcp-public-data--gnomad/o",
+                    "pattern": "^(https?|file)://\\S+$",
+                    "hidden": true
+                },
+                "ucsc_base": {
+                    "type": "string",
+                    "description": "UCSC hg38 download directory (transcript tables and hg38.fa.gz).",
+                    "default": "https://hgdownload.soe.ucsc.edu/goldenPath/hg38",
+                    "pattern": "^(https?|file)://\\S+$",
+                    "hidden": true
+                }
+            }
+        },
+        "generic_options": {
+            "title": "Generic options",
+            "type": "object",
+            "properties": {
+                "help": {
+                    "type": ["boolean", "string"],
+                    "description": "Show this help; give a parameter name for its detailed help.",
+                    "hidden": true
+                },
+                "helpFull": {
+                    "type": "boolean",
+                    "description": "Show the help with every parameter's details.",
+                    "hidden": true
+                },
+                "showHidden": {
+                    "type": "boolean",
+                    "description": "Include hidden parameters in the help.",
+                    "hidden": true
+                }
+            }
+        }
+    },
+    "allOf": [
+        { "$ref": "#/$defs/input_options" },
+        { "$ref": "#/$defs/window_options" },
+        { "$ref": "#/$defs/task_options" },
+        { "$ref": "#/$defs/output_options" },
+        { "$ref": "#/$defs/infrastructure_options" },
+        { "$ref": "#/$defs/endpoint_options" },
+        { "$ref": "#/$defs/generic_options" }
+    ]
+}
