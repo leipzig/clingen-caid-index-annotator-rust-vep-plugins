@@ -258,6 +258,62 @@ nextflow_pipeline {
         }
     }
 
+    // BUILD_INDEX opens --genome by the path the launcher sees (the manifest records it), so an
+    // object-store URL, or any genome with a work directory in object storage, would fail only
+    // after the whole enumeration. settings() refuses it before any task, without touching it.
+    test("an s3:// genome is refused at launch") {
+        when {
+            params {
+                chrom  = "21"
+                genome = "s3://clingen-test-bucket/genome/GRCh38.bin"
+                outdir = "$outputDir"
+            }
+        }
+        then {
+            def out = (workflow.stdout + workflow.stderr).join('\n')
+            assert workflow.failed
+            assert out.contains('--genome s3://clingen-test-bucket/genome/GRCh38.bin: ')
+            assert out.contains('leave --genome out and BUILD_GENOME builds the genome')
+            assert workflow.trace.tasks().size() == 0
+        }
+    }
+
+    test("a genome that does not exist is refused at launch") {
+        when {
+            params {
+                chrom  = "21"
+                genome = "${outputDir}/no-such-dir/GRCh38.bin"
+                outdir = "$outputDir"
+            }
+        }
+        then {
+            assert workflow.failed
+            assert (workflow.stdout + workflow.stderr).join('\n').contains("--genome ${outputDir}/no-such-dir/GRCh38.bin: no such file")
+            assert workflow.trace.tasks().size() == 0
+        }
+    }
+
+    test("stub: a local genome with its idx is used, not built") {
+        when {
+            params {
+                def bin = new File("${outputDir}/genome/GRCh38.bin")
+                bin.parentFile.mkdirs()
+                bin.text = ''
+                new File("${bin}.idx").text = ''
+                chrom  = "21"
+                genome = bin.path
+                outdir = "$outputDir"
+            }
+        }
+        then {
+            def counts = workflow.trace.tasks().countBy { it.name.tokenize(' ')[0].tokenize(':')[-1] }
+            assert workflow.success
+            assert !counts.containsKey('FETCH_FASTA')
+            assert !counts.containsKey('BUILD_GENOME')
+            assert counts.BUILD_INDEX == 1
+        }
+    }
+
     // gnomAD v4 has no chrM exomes, so MT gets no site list at all: gatherByChrom must still
     // hand MERGE_SITES an empty list for it, or MT would never reach KEYS and the index.
     test("stub: a chromosome with no site lists still reaches MERGE_SITES and the index") {

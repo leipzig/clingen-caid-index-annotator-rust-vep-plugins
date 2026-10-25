@@ -225,12 +225,28 @@ def settings() {
         clinvarMd5 = md5.exists() ? md5 : []
     }
 
+    // BUILD_INDEX hands build the genome's path as the launcher sees it, for the manifest, and
+    // build opens it there. That works only for a file on a disk the tasks share with the
+    // launcher: not an object-store URL, and not with a work directory in object storage, whose
+    // tasks see no launcher path. Refused here, rather than after the whole enumeration. The
+    // scheme is read from the text, so an s3:// URL is not touched (nor its plugin loaded).
     def genome = null
     if (params.genome) {
-        def bin = file(params.genome.toString())
-        def idx = file("${params.genome}.idx")
+        def given = params.genome.toString()
+        def scheme = given ==~ /^[A-Za-z][A-Za-z0-9+.-]*:\/\/.*/ ? given.tokenize(':')[0].toLowerCase() : 'file'
+        def workScheme = workflow.workDir.scheme
+        if (scheme != 'file' || workScheme != 'file') {
+            error("--genome ${given}: BUILD_INDEX opens the genome by this path, so it must be a local or shared " +
+                "file, with a local or shared work directory (genome: ${scheme}, work directory: " +
+                "${workflow.workDir.toUriString()}); leave --genome out and BUILD_GENOME builds the genome")
+        }
+        def bin = file(given)
+        if (!bin.isFile()) {
+            error("--genome ${given}: ${bin.exists() ? 'not a file' : 'no such file'}")
+        }
+        def idx = file("${given}.idx")
         if (!idx.exists()) {
-            error("--genome ${params.genome}: no ${idx.name} beside it (clingen-index genome writes both)")
+            error("--genome ${given}: no ${idx.name} beside it (clingen-index genome writes both)")
         }
         genome = [bin, idx]
     }

@@ -61,9 +61,8 @@
                 },
                 "genome": {
                     "type": "string",
-                    "format": "file-path",
-                    "exists": true,
-                    "description": "Prebuilt vareffect genome (GRCh38.bin, with its .idx beside it); built from UCSC hg38.fa.gz when not given."
+                    "description": "Prebuilt vareffect genome (GRCh38.bin, with its .idx beside it); built from UCSC hg38.fa.gz when not given.",
+                    "help_text": "A local or shared file, with a local or shared work directory: BUILD_INDEX opens it by this path, so an s3:// URL, or any --genome with an s3:// work directory, is refused when the run starts. A plain string, so an object-store URL is not probed while the parameters are checked; the run checks the file and its .idx itself."
                 },
                 "cache": {
                     "type": "string",
