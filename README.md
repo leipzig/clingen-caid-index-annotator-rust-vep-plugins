@@ -750,9 +750,9 @@ count against `metadata.json`, links a built genome into `genome/`, runs the
 `rebuild` command, and compares the md5 of the new `caid.fst` and
 `manifest.json` with `metadata.json`'s expected ones and with
 `<outdir>/index/`. It names every difference and exits 1 if there is one. It
-needs `jq` and `openssl`, takes `clingen-index` from `PATH` (set
-`CLINGEN_INDEX` to another command, such as `apptainer exec
-clingen-index.sif clingen-index`), and says whether that binary's sha256 is
+needs `jq`, takes `clingen-index` from `PATH` (set `CLINGEN_INDEX` to
+another command, such as `apptainer exec clingen-index.sif clingen-index`),
+and, with `openssl`, says whether that binary's sha256 is
 `tool.clingen_index_sha256`. For an `s3://` outdir, copy `index/`, `keys/`
 and `genome/` down first. When a `--genome` was given and its recorded path
 cannot be made on this machine, `GENOME_STANDIN=<any file>` rebuilds with
