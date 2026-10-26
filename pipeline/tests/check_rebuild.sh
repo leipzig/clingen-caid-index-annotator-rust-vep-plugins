@@ -25,8 +25,8 @@
 # that built the index is named by metadata.json's tool.clingen_index_sha256, not by its version
 # string (the crate's, not raised with each change to crates/); tool.note says how to build it.
 # A clingen-index from PATH is compared with that sha256 and the result printed; another build
-# may still give the same bytes, and the md5s decide. Needs jq, gzip, md5sum (or md5) and
-# openssl.
+# may still give the same bytes, and the md5s decide. Needs jq, gzip and md5sum (or md5); the
+# sha256 comparison also needs openssl, and is left out without it.
 
 set -euo pipefail
 
@@ -154,7 +154,7 @@ if [[ $version != "$recorded_version" ]]; then
     echo "check_rebuild: note: ${tool[*]} is '$version'; the run's was '$recorded_version'" >&2
 fi
 recorded_sha=$(jq -r '.tool.clingen_index_sha256 // empty' "$meta")
-if [[ ${#tool[@]} -eq 1 && -n $recorded_sha ]]; then
+if [[ ${#tool[@]} -eq 1 && -n $recorded_sha ]] && command -v openssl > /dev/null; then
     sha=$(openssl dgst -sha256 -r "$(command -v "${tool[0]}")" | awk '{ print $1 }')
     if [[ $sha == "$recorded_sha" ]]; then
         echo "check_rebuild: ${tool[0]} is the binary that built the index (sha256 $sha)" >&2
