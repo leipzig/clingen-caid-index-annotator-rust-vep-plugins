@@ -661,8 +661,10 @@ beside it:
     name, session, launch, project and work directories, start time, the
     time the document was written, and the container and engine as
     configured;
-  - `tool`: `clingen-index --version`, asked by the `DIGEST` task inside the
-    task image, and the manifest's vareffect version;
+  - `tool`: what `DIGEST` finds inside the task image: `clingen-index
+    --version`, the sha256 and path of that binary and the platform (`uname
+    -sm`); `build_source`, a digest of the image's build inputs in the
+    launcher's checkout; and the manifest's vareffect version;
   - `params`: every parameter as resolved;
   - `regions`: the region set (or the BED file's name and md5), pad, merge
     gap, max window, flank, chromosomes, and windows, core and query bp from
@@ -711,8 +713,36 @@ absolute path, which must exist when the rebuild runs: `build` refuses a
 missing one, though it does not read it, so any file there gives the same
 bytes. With the genome recorded the same way, `manifest.json` comes back
 byte-identical too; with another genome path only its `genome` line
-differs, and `caid.fst` is the same. Use the `clingen-index` release that
-`tool.clingen_index_version` names.
+differs, and `caid.fst` is the same. The steps make `<outdir>` absolute
+before they change directory, so it may be given relative to where they
+start.
+
+**The binary.** `tool.clingen_index_version` does not identify the
+`clingen-index` that built an index: it is the crate's version, `0.1.0`,
+which has stayed the same through every commit to `crates/` so far
+(2026-10-25). `tool.clingen_index_sha256` does, for the platform
+`tool.platform` names. To get that binary again, build the image from the checkout of
+`pipeline.git_commit` (or from a copy whose `tool.build_source.digest`
+matches; `build_source` is computed like `source_digest`, over the
+`Dockerfile`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and every
+file under `crates/`) on the same platform, and compare the sha256 of its
+`/usr/local/bin/clingen-index`:
+
+```bash
+find Cargo.toml Cargo.lock rust-toolchain.toml Dockerfile crates -type f | LC_ALL=C sort \
+  | xargs sha256sum | sha256sum          # tool.build_source.digest
+docker build -t clingen-index:0.1.0 .
+docker run --rm clingen-index:0.1.0 sha256sum /usr/local/bin/clingen-index
+```
+
+`build_source` describes the launcher's files, which are the image's only
+if the image was built from them; the binary's sha256 is taken inside the
+image the run used. On 2026-10-25 a `docker build --no-cache --target build` of the
+`crates/`, `Cargo.lock` and `Dockerfile` unchanged since `aa3078b` gave a
+binary with the sha256 of the one in the image built from them earlier that
+day (`b2acd6afd421…`, linux/arm64), so the image build repeats. A binary with
+another sha256, such as a Mac build, may still write the same bytes (it did
+for chr21, below); the md5 comparison is what decides.
 
 `pipeline/tests/check_rebuild.sh <outdir>` does all of it: in a new
 temporary directory it gunzips `keys/` and checks each shard's md5s and line
@@ -720,9 +750,15 @@ count against `metadata.json`, links a built genome into `genome/`, runs the
 `rebuild` command, and compares the md5 of the new `caid.fst` and
 `manifest.json` with `metadata.json`'s expected ones and with
 `<outdir>/index/`. It names every difference and exits 1 if there is one. It
-needs `jq`, and takes `clingen-index` from `PATH` (set `CLINGEN_INDEX` to
-another command, such as `apptainer exec clingen-index.sif clingen-index`).
-For an `s3://` outdir, copy `index/`, `keys/` and `genome/` down first.
+needs `jq` and `openssl`, takes `clingen-index` from `PATH` (set
+`CLINGEN_INDEX` to another command, such as `apptainer exec
+clingen-index.sif clingen-index`), and says whether that binary's sha256 is
+`tool.clingen_index_sha256`. For an `s3://` outdir, copy `index/`, `keys/`
+and `genome/` down first. When a `--genome` was given and its recorded path
+cannot be made on this machine, `GENOME_STANDIN=<any file>` rebuilds with
+that file in its place: `caid.fst` must still match byte for byte, and
+`manifest.json` once its `genome` value is put back to the recorded one; the
+last line says which checks were made.
 
 ### The chr21 run (2026-10-24)
 
@@ -908,7 +944,7 @@ which a `-resume` keeps for the tasks it reuses. These ran from 22:31 MDT on
 2026-10-24, already 2026-10-25 in UTC, so the same runs would now record
 `registry_pc_exons_2026-10-25` and a `harvest_date` of 2026-10-25.
 
-**Metadata and rebuild (2026-10-26).** The pipeline has since gained
+**Metadata and rebuild (2026-10-25).** The pipeline has since gained
 `keys/` and `index/metadata.json` ([Reproducing an index](#reproducing-an-index)).
 A `-resume` of this run (session `1f25d9d8`) cannot reuse its Registry
 tasks: `ENUMERATE` and `LOOKUP` have changed since (each records the UTC day
@@ -939,7 +975,16 @@ gave 1,065 keys fewer: the live Registry also returned alleles that start
 before a window and end inside it (`NC_000021.9:g.10511963_10521699del`,
 from the window starting at 10,521,332).
 
-`results/chr21-meta/index/metadata.json` is 27,350 bytes, and
+After `tool` gained the binary's sha256 and `build_source`, the same
+command (session `1f25d9d8`, the stand-in's `--registry_url` again, with
+nothing listening there) was resumed once more on 2026-10-25: every
+`ENUMERATE` and `LOOKUP` task came back cached, and only `DIGEST` and
+`FINALIZE` ran (`completed=2 failed=0 cached=15`, 12 s). `caid.fst` is
+still `fee1e8364418752fb8f8fc2f2f1384ed`, and `metadata.json` records the
+image's binary as sha256 `b2acd6afd421…` on `Linux aarch64`.
+
+`results/chr21-meta/index/metadata.json` is 35,953 bytes (27,350 before
+`tool` gained `build_source`'s file list), and
 `keys/NC_000021.9.tsv.gz` 34,530,254 bytes (209,452,251 unpacked, 5,212,187
 lines). `bash pipeline/tests/check_rebuild.sh results/chr21-meta`, with
 `clingen-index` built on the Mac from the same commit, rebuilt `caid.fst`
@@ -1168,7 +1213,7 @@ bash pipeline/tests/check_rebuild.sh <shared>/clingen/results/pc_exons   # or: p
 ```
 
 which needs about 24 GB of temporary space (`TMPDIR`) for the unpacked
-shards and the new index. Checked offline on 2026-10-26: the SLURM command,
+shards and the new index. Checked offline on 2026-10-25: the SLURM command,
 with `-profile slurm,host -stub` and `pipeline/tests/slurm.config` added and
 a local copy of the cache, ran through the `sbatch`/`squeue`/`scancel` shims
 of `pipeline/tests/run_slurm_shim.sh` (210 jobs, 53 of them on the network
@@ -1227,13 +1272,13 @@ real cluster or AWS account, and an `s3://` `--cache` is untested.
 
 ### Tests
 
-`nf-test test` in `pipeline/` runs 117 tests offline (every process, the
+`nf-test test` in `pipeline/` runs 119 tests offline (every process, the
 functions that assemble `index/metadata.json`, and stub and real workflow
 runs against a mock Registry, whose published `keys/` the real runs rebuild
-with `pipeline/tests/check_rebuild.sh`; 117 passed in 340 s on 2026-10-26).
+with `pipeline/tests/check_rebuild.sh`; 119 passed in 294 s on 2026-10-25).
 `nf-test test tests-network/workflow_mt.nf.test` there runs the workflow on
 chrM against the live Registry, checks its `metadata.json` and `keys/`, and
-rebuilds its index from `keys/` (passed on 2026-10-26: 8,695 keys). `bash
+rebuilds its index from `keys/` (passed on 2026-10-25: 8,695 keys). `bash
 pipeline/tests/run_slurm_shim.sh` runs the `slurm` profile through
 `sbatch`/`squeue`/`scancel` shims that run the jobs locally, and checks each
 job's partition and time limit; `bash pipeline/tests/check_profiles.sh`

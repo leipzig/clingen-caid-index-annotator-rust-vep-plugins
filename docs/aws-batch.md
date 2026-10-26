@@ -411,10 +411,12 @@ the new index; set `TMPDIR` to a disk with room), runs the `rebuild` command of
 `index/metadata.json` and compares the new `caid.fst` and `manifest.json` with
 the expected md5s and the published files, naming any difference. It needs `jq`
 and `clingen-index` on `PATH` (`cargo build --release -p clingen-index` in the
-checkout). A rerun of the pipeline would not reproduce the index, as the
+checkout), and says whether that binary is the run's (`tool.clingen_index_sha256`
+in `metadata.json`): a Mac build is not, and may still write the same bytes, so
+the md5s decide. A rerun of the pipeline would not reproduce the index, as the
 Registry keeps gaining alleles; README.md, Reproducing an index, explains.
 
-What was checked offline (2026-10-26), since no AWS account was used: these
+What was checked offline (2026-10-25), since no AWS account was used: these
 parameters, resolved with `nextflow config` through `conf/awsbatch.config`, give
 the `awsbatch` executor, the queue, the ECR image and `us-east-1`; and the same
 parameters with a local cache ran as a stub on the `slurm` profile through the
