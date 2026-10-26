@@ -868,6 +868,104 @@ unregistered, and the `unsupported` ones are the 25 skipped records; vep-rs
 drops the 23 with `ALT=.` before any plugin sees them, as in
 [ClinVar coverage](#clinvar-coverage).
 
+### SNVs in the exome, by source
+
+The SNVs the index gets in the exome from ClinVar, from gnomAD exomes and
+from both, counted on 2026-10-25 from the files of
+[the chr21 run](#the-chr21-run-2026-10-24), which used `--datasets clinvar`,
+and from gnomAD v4.1's chr21 exome VCF, downloaded for this count. The exome
+here is the default region set, `--regions pc_exons` with `--pad 20`: the
+whole exons, UTRs included, of every transcript with a coding range in
+UCSC's `ncbiRefSeq` and `knownGene` tables (the two files the run used, md5s
+in its `sources.tsv`), each padded by 20 bp on both sides, taken as a union.
+UTR exons make up about two-thirds of it (the padded coding parts alone are
+49.5 Mb genome-wide), and it takes in predicted RefSeq models (`XM_`) and
+every GENCODE coding isoform, so it is several times a capture kit's exome.
+On chr21 it is 2,727 intervals and 1,588,416 bp, or 4,765,248 possible SNVs
+at three per base; on the 25 primary contigs, 254,888 intervals and
+148,150,221 bp, or 444,450,663 possible SNVs (59 of those bases are N in
+`GRCh38.bin`, so 444,450,486 real substitutions; chr21's exome has no N).
+The windows are larger again (4,573,512 bp of cores on chr21, 406.7 Mb
+genome-wide), as `--merge_gap` joins padded exons no more than 5 kb apart
+and takes in the intron between them. An SNV is one base (A, C, G or T)
+replaced by another, counted once per position and allele. It is registered
+if it has a CA ID, and only registered SNVs can be index keys.
+
+The table counts chr21: ClinVar from its 2026-10-19 VCF, gnomAD v4.1 exomes
+from `data/gnomad41_exomes_chr21/gnomad.exomes.v4.1.sites.chr21.vcf.bgz`
+(2,250,319,809 bytes, md5 `7ca6d51a42425b857eddb46d7bc5832d`, the
+`fKbVGkJCW4V+3bRte8WDLQ==` that Google Cloud Storage lists for it; every
+record, whatever its `FILTER`, as `GNOMAD_SITES` keeps them) and the
+Registry from the run's enumeration of 2026-10-24. The last column is the
+registered SNVs as a share of the Registry's:
+
+| chr21, in the exome | SNVs | registered | of the Registry's |
+|---|---:|---:|---:|
+| ClinVar 2026-10-19 alone (`--datasets clinvar`) | 46,086 | 46,083 | 2.0% |
+| gnomAD v4.1 exomes alone (`--datasets gnomad_exomes`) | 772,265 | 772,265 | 34.0% |
+| ClinVar and gnomAD v4.1 exomes (`--datasets clinvar,gnomad_exomes`) | 784,469 | 784,466 | 34.6% |
+| Registry enumeration, 2026-10-24 (any `--datasets`) | 2,268,617 | 2,268,617 | 100% |
+
+Every registered dataset SNV in the exome is in the enumeration, so in the
+exome the index holds the same 2,268,617 SNVs whatever `--datasets` says:
+the enumeration together with every registered SNV of ClinVar, gnomAD
+exomes and gnomAD genomes is still 2,268,617, 47.6% of the 4,765,248
+possible. The datasets matter outside the windows, where they are the
+index's only source (the run's index has 4,544,274 SNV keys: the 4,544,144
+enumerated, about half of them in introns and flanks, and 130 registered
+ClinVar SNVs outside the windows), and their harvested rows are what
+`validate` checks. Of the 1,995,826 gnomAD exome SNVs on chr21, 1,223,561
+(61%) lie outside the exome: 652,769 in the windows' introns and flanks, all
+of them enumerated, and 570,792 beyond the windows, most of them not PASS
+and many in exons of non-coding transcripts. No lookup of gnomAD exomes has
+been made, so whether those 570,792 are registered is not known, beyond the
+110,658 of them that gnomAD genomes or ClinVar also has, which those
+harvests found registered. Of the 772,265 in the exome, 348,035 have
+`FILTER=PASS`, all registered (15.3% of the Registry's). gnomAD v4.1
+genomes, which `--datasets gnomad_genomes` would bring, have 336,467 SNVs in
+the chr21 exome, all registered (14.8%).
+
+Enumeration membership agrees with the Registry's lookups wherever both
+answered: the run's ClinVar harvest calls 46,083 of its 46,086 exome SNVs
+registered, with the enumeration's CA IDs, and the other 3
+(`g.43076233C>T`, `g.45493228A>G`, `g.46354074T>G`) unregistered and absent
+from the enumeration; and the gnomAD v4.1 genomes harvest
+(`data/chr21_chunks`) calls all 336,467 registered, with the same CA IDs.
+No lookup covers gnomAD exomes: their registered column is enumeration
+membership alone, and all 1,425,034 gnomAD exome SNVs in the windows are
+enumerated.
+
+ClinVar is the one source counted genome-wide as well, so its SNVs split
+exactly into exonic and the rest. The exons alone, without the 20 bp pads,
+are 2,754 intervals and 1,478,666 bp on chr21 and 258,074 intervals and
+137,893,448 bp on the 25 primary contigs; the registered counts are the CA
+IDs of [ClinVar coverage](#clinvar-coverage): its 2026-10-24 lookups, and
+the chr21 gnomAD harvest of 2026-10-23 for the 24,244 chr21 ones it already
+had (22,660 of them in the exome).
+
+| ClinVar 2026-10-19 SNVs | chr21 | registered | genome-wide | registered |
+|---|---:|---:|---:|---:|
+| in exons | 40,362 | 40,361 | 3,658,015 | 3,657,907 |
+| in the 20 bp pads beside them | 5,724 | 5,722 | 461,060 | 460,765 |
+| in the exome (the two above) | 46,086 | 46,083 | 4,119,075 | 4,118,672 |
+| outside the exome: introns, non-coding genes, intergenic | 1,903 | 1,903 | 150,257 | 150,204 |
+| all, genome-wide or chromosome-wide | 47,989 | 47,986 | 4,269,332 | 4,268,876 |
+
+So 85.7% of ClinVar's SNVs are exonic and 96.5% lie in the exome. With
+`--datasets clinvar` the index holds every registered ClinVar SNV, in the
+exome or not: the run's chr21 index holds all 47,986, the 46,083 in the
+exome and the 1,773 outside it but inside the windows through the
+enumeration, and the 130 beyond the windows through the harvest. Genome-wide
+that is 4,268,876. The Registry and gnomAD exomes were counted on chr21
+only. Scaled by exome size (148,150,221 / 1,588,416 bp,
+93.27 times), the whole exome would hold about 211.6 million Registry SNVs,
+about 72.0 million gnomAD v4.1 exome SNVs, all registered if chr21 is
+typical, and about 73.2 million from ClinVar and gnomAD exomes together. The same scaling of ClinVar's 46,086 chr21 SNVs gives 4,298,402,
+4.4% above the exact 4,119,075, which shows how far chr21 can be from the
+genome as a whole. Counting the Registry's exome SNVs genome-wide needs the
+[full exome run](#the-full-exome-run-not-run)'s enumeration; gnomAD's need
+gnomAD v4.1's exome VCF for every chromosome.
+
 ### The full exome run (not run)
 
 `--chrom all --regions pc_exons` is the run the spec plans: 60,328 windows
