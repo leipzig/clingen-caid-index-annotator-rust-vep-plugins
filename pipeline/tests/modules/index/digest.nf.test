@@ -1,0 +1,135 @@
+// DIGEST on stand-in files made in the test: an index, a genome, hg38.fa.gz and two --cache
+// directories, with the checks' statuses and KEYS stats the gate reads. Its digest.tsv carries
+// the md5 and size of each, the version of clingen-index (from PATH here, the task image's in a
+// real run) and the failed checks, for index/metadata.json.
+
+nextflow_process {
+
+    name    "DIGEST"
+    script  "modules/index.nf"
+    process "DIGEST"
+    tag     "index"
+
+    // A KEYS stats file: header and one row.
+    def stats = { String dir, String chrom, int enumFiles, int enumerated ->
+        TestFiles.write("${dir}/keys_${chrom}.tsv", [
+            'chrom\taccession\tenum_files\tenumerated\tharvested\tkeys',
+            "${chrom}\tNC_012920.1\t${enumFiles}\t${enumerated}\t7\t${Math.max(enumerated, 7)}".toString(),
+        ])
+    }
+
+    // The files DIGEST stages, as Nextflow code, and their paths for the checks.
+    def inputs = { String dir ->
+        def index = new File("${dir}/index")
+        index.mkdirs()
+        new File(index, 'caid.fst').text = 'fst'
+        new File(index, 'manifest.json').text = '{"entries": 1}\n'
+        def bin = TestFiles.write("${dir}/genome/GRCh38.bin", ['bin'])
+        def idx = TestFiles.write("${dir}/genome/GRCh38.bin.idx", ['idx'])
+        def fasta = TestFiles.write("${dir}/fasta/hg38.fa.gz", ['>chrM', 'GATC'])
+        // What SPLIT_CACHE reads: chunk_*.tsv and <chrom>.tsv.gz at the top; not notes.txt, nor
+        // a file in a subdirectory.
+        def chunk0 = TestFiles.write("${dir}/chunks/chunk_00000.tsv", ['MT\t3308\tT\tC\tCA340945\tNC_012920.1:m.3308T>C\t'])
+        def chunk1 = TestFiles.write("${dir}/chunks/chunk_00001.tsv", ['MT\t3310\tC\tT\t\tNC_012920.1:m.3310C>T\t'])
+        TestFiles.write("${dir}/chunks/notes.txt", ['not a harvest file'])
+        TestFiles.write("${dir}/chunks/old/chunk_00009.tsv", ['MT\t1\tA\tG\tCA1\tNC_012920.1:m.1A>G\t'])
+        def harvest = TestFiles.write("${dir}/harvest/MT.tsv.gz", ['MT\t3270\tCT\tC\tCA2573320431\tNC_012920.1:m.3273del\t'])
+        return [
+            nf: [
+                index: "file('${index}')",
+                genome: "[file('${bin}'), file('${idx}')]",
+                fasta: "file('${fasta}')",
+                cache: "[file('${dir}/chunks'), file('${dir}/harvest')]",
+            ],
+            files: [index: index, bin: bin, idx: idx, fasta: fasta, chunk0: chunk0, chunk1: chunk1, harvest: harvest],
+        ]
+    }
+
+    def row = { String role, Object f -> ['file', role, new File(f.toString()).name, new File(f.toString()).length().toString(), TestFiles.md5(f)].join('\t') }
+
+    test("DIGEST records the version, the md5 and size of every file, and no gate failure when the checks passed") {
+        def staged
+        when {
+            staged = inputs("${outputDir}/in")
+            process {
+                """
+                input[0] = ${staged.nf.index}
+                input[1] = ${staged.nf.genome}
+                input[2] = ${staged.nf.fasta}
+                input[3] = ${staged.nf.cache}
+                input[4] = ['reach:MT:0', 'validate:MT:0']
+                input[5] = [file('${stats("${outputDir}/in", 'MT', 1, 58)}')]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def lines = path(process.out.digest[0]).readLines()
+            def f = staged.files
+            def version = 'clingen-index --version'.execute().text.trim()
+            assert version ==~ /clingen-index \d+\.\d+\.\d+.*/
+            assert lines == [
+                "tool\tclingen_index_version\t${version}".toString(),
+                row('index', "${f.index}/caid.fst"),
+                row('index', "${f.index}/manifest.json"),
+                row('genome', f.bin),
+                row('genome', f.idx),
+                row('fasta', f.fasta),
+                row('cache1', f.chunk0),
+                row('cache1', f.chunk1),
+                row('cache2', f.harvest),
+            ]
+        }
+    }
+
+    // The gate as FINALIZE applies it, from the same inputs: here a failed reach and a chromosome
+    // whose windows enumerated nothing (Ruling R8). Without a fasta (a --genome given) or a cache,
+    // those rows are left out; a single --cache directory is staged as cache.
+    test("DIGEST records the failed checks, and only the files it is given") {
+        def staged
+        when {
+            staged = inputs("${outputDir}/in")
+            process {
+                """
+                input[0] = ${staged.nf.index}
+                input[1] = ${staged.nf.genome}
+                input[2] = []
+                input[3] = [file('${outputDir}/in/harvest')]
+                input[4] = ['reach:MT:1', 'validate:MT:0']
+                input[5] = [file('${stats("${outputDir}/in", 'MT', 2, 0)}')]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def lines = path(process.out.digest[0]).readLines()
+            assert lines.count { it.startsWith('file\tfasta\t') } == 0
+            assert lines.findAll { it.startsWith('file\tcache') } == [row('cache', staged.files.harvest)]
+            assert lines.findAll { it.startsWith('gate\t') } == [
+                'gate\treach MT: exit 1 (see reports/reach_MT.txt)',
+                'gate\tenumerate MT: 2 windows file(s) gave no allele (has the Registry answer changed?)',
+            ]
+        }
+    }
+
+    test("stub: DIGEST") {
+        options "-stub"
+        when {
+            def staged = inputs("${outputDir}/in")
+            process {
+                """
+                input[0] = ${staged.nf.index}
+                input[1] = ${staged.nf.genome}
+                input[2] = []
+                input[3] = []
+                input[4] = ['reach:MT:0']
+                input[5] = [file('${stats("${outputDir}/in", 'MT', 1, 0)}')]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert path(process.out.digest[0]).readLines()[0].startsWith('tool\tclingen_index_version\t')
+        }
+    }
+}

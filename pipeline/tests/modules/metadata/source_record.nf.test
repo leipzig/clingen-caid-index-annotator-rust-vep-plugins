@@ -1,0 +1,37 @@
+// sourceRecord (modules/metadata.nf) on the pipeline itself: the digest metadata.json records as
+// source_digest is what the shell command in the README and in modules/metadata.nf prints, so
+// a copy of pipeline/ without .git can be matched to it.
+
+nextflow_function {
+
+    name    "sourceRecord"
+    script  "modules/metadata.nf"
+    function "sourceRecord"
+    tag     "metadata"
+
+    test("sourceRecord digests every file a run reads, as sha256sum and sort give it") {
+        when {
+            function {
+                """
+                input[0] = '${projectDir}'
+                """
+            }
+        }
+        then {
+            assert function.success
+            def record = function.result
+            def names = record.files*.path
+            assert names == ['conf/awsbatch.config', 'conf/host.config', 'conf/local.config', 'conf/slurm.config', 'main.nf',
+                'modules/index.nf', 'modules/metadata.nf', 'modules/registry.nf', 'modules/sources.nf',
+                'nextflow.config', 'nextflow_schema.json']
+            record.files.each { f ->
+                assert f.sha256 == TestFiles.digest('SHA-256', new File("${projectDir}/${f.path}").bytes)
+            }
+            def command = 'sha256sum main.nf modules/*.nf nextflow.config conf/*.config nextflow_schema.json | LC_ALL=C sort -k2 | sha256sum'
+            def proc = ['bash', '-c', "cd '${projectDir}' && ${command}"].execute()
+            def out = proc.text
+            assert proc.waitFor() == 0
+            assert out.tokenize(' ')[0] == record.digest
+        }
+    }
+}

@@ -4,7 +4,9 @@
 // MockRegistry (tests/lib) on 127.0.0.1 standing in for the Registry: it knows the 58 registered
 // alleles of tests/data/pairs_MT.tsv plus two reference alleles (one written `=`, one a delins that
 // puts back the reference's bases, as the live Registry holds some), and answers lookups from
-// tests/data/harvest_MT.tsv. tests-network/workflow_mt.nf.test runs MT against the real Registry.
+// tests/data/harvest_MT.tsv. A published run carries keys/ and index/metadata.json, and
+// tests/check_rebuild.sh rebuilds its index from them byte for byte.
+// tests-network/workflow_mt.nf.test runs MT against the real Registry.
 
 nextflow_pipeline {
 
@@ -38,6 +40,16 @@ nextflow_pipeline {
 
     def reachCounts = { String file ->
         path(file).readLines().takeWhile { !it.startsWith('class\t') }.collectEntries { it.split('\t') as List }
+    }
+
+    // tests/check_rebuild.sh on a run's outdir: [exit status, its stderr]. It rebuilds the index from
+    // keys/ in a temporary directory with clingen-index from PATH (as the host profile has it).
+    def checkRebuild = { String projectDir, String results ->
+        def proc = ['bash', "${projectDir}/tests/check_rebuild.sh", results].execute()
+        def out = new StringBuilder()
+        def err = new StringBuilder()
+        proc.waitForProcessOutput(out, err)
+        [proc.exitValue(), err.toString()]
     }
 
     // The command line and a params file give the strict parser Strings: 'false' must stay false.
@@ -93,6 +105,76 @@ nextflow_pipeline {
             assert TestFiles.lines("${results}/reports/skipped.tsv.gz") == [
                 'dataset\tCHROM\tPOS\tID\tREF\tALT\treason', 'clinvar\tMT\t1438\t177708\tA\t.\tno_alt',
             ]
+
+            // keys/: the one shard the index was built from, as KEYS wrote it (the 58 pairs), gzipped
+            assert new File("${results}/keys").list().toList() == ['NC_012920.1.tsv.gz']
+            def shard = "${results}/keys/NC_012920.1.tsv.gz"
+            assert TestFiles.lines(shard) == path("${projectDir}/tests/data/pairs_MT.tsv").readLines()
+
+            // index/metadata.json: every part, checked against the published files
+            def meta = new groovy.json.JsonSlurper().parse(new File("${results}/index/metadata.json"))
+            assert meta.format_version == 1
+            assert meta.pipeline.git_commit ==~ /[0-9a-f]{40}/
+            assert meta.pipeline.git_dirty instanceof Boolean
+            assert meta.pipeline.source_digest ==~ /[0-9a-f]{64}/
+            assert meta.pipeline.nextflow_version == '26.04.7'
+            assert meta.pipeline.command_line.startsWith('nextflow')
+            assert meta.pipeline.profile == 'host'
+            // as Nextflow lists them: nf-test also passes nextflow.config with -c, so it is there twice
+            assert meta.pipeline.config_files.toSet() == ["${projectDir}/nextflow.config", "${projectDir}/tests/nextflow.config"]*.toString().toSet()
+            assert meta.pipeline.project_dir == projectDir.toString()
+            ['run_name', 'session_id', 'launch_dir', 'work_dir', 'start', 'written'].each { assert meta.pipeline[it] }
+            assert meta.pipeline.containsKey('container') && meta.pipeline.container_engine == null
+            assert meta.tool.clingen_index_version == 'clingen-index --version'.execute().text.trim()
+            assert meta.tool.vareffect_version == manifest.vareffect_version
+            assert meta.params.chrom == 'MT'
+            assert meta.params.registry_url == registry.url
+            assert meta.params.include_reference == 'false'
+            def bed = "${projectDir}/tests/data/regions_MT.bed"
+            assert meta.regions.bed == [name: 'regions_MT.bed', path: bed, md5: TestFiles.md5(bed)]
+            assert [meta.regions.pad, meta.regions.merge_gap, meta.regions.max_window, meta.regions.flank] == [20, 5000, 50000, 200]
+            assert meta.regions.chromosomes == ['MT']
+            assert meta.regions.windows == 2
+            assert meta.regions.per_chromosome.MT.windows == 2
+            assert meta.registry.base_url == registry.url
+            assert meta.registry.registry_date == today
+            assert meta.registry.harvest_date == today
+            assert [meta.registry.page_size, meta.registry.split_overlap, meta.registry.include_reference] == [200000, 1000, false]
+            def sources = path("${results}/reports/sources.tsv").readLines()
+            assert meta.sources.downloads.size() == sources.size() - 1
+            assert meta.sources.downloads*.source == sources.drop(1).collect { it.tokenize('\t')[0] }
+            assert meta.sources.clinvar.release == '2026-10-19'
+            assert meta.sources.gnomad == null
+            assert meta.sources.genome.built == true
+            assert meta.sources.genome.fasta.md5 == TestFiles.md5("${projectDir}/tests/data/chrM.fa.gz")
+            assert meta.sources.genome.fasta.url.endsWith('/bigZips/hg38.fa.gz')
+            assert meta.sources.genome.files.collectEntries { [it.name, it.md5] } == [
+                'GRCh38.bin': TestFiles.md5("${results}/genome/GRCh38.bin"),
+                'GRCh38.bin.idx': TestFiles.md5("${results}/genome/GRCh38.bin.idx"),
+            ]
+            assert meta.cache.directories == []
+            assert meta.outputs.index['caid.fst'] == [size: new File("${results}/index/caid.fst").length(), md5: TestFiles.md5("${results}/index/caid.fst")]
+            assert meta.outputs.index['manifest.json'].md5 == TestFiles.md5("${results}/index/manifest.json")
+            assert meta.outputs.entries == 58
+            assert meta.outputs.keys == [[
+                file: 'NC_012920.1.tsv.gz', md5: TestFiles.md5(shard), size: new File(shard).length(),
+                tsv_md5: TestFiles.gunzippedMd5(shard), tsv_size: TestFiles.lines(shard).sum { it.length() + 1 }, lines: 58,
+            ]]
+            assert meta.checks.gate.passed == true
+            assert meta.checks.statuses == ['reach:MT:0', 'validate:MT:0']
+            assert meta.checks.per_chromosome.MT['index:keys'] == 58
+            assert meta.checks.keys.MT.enumerated == 58
+            assert meta.rebuild.argv == ['clingen-index', 'build', '--sorted', 'keys/NC_012920.1.tsv', '--out', 'index',
+                '--source', "registry_bed_${today}".toString(), '--source', 'clinvar_2026-10-19', '--harvest-date', today,
+                '--genome', 'genome/GRCh38.bin', '--genome-relative']
+            assert meta.rebuild.expected_md5 == ['caid.fst': TestFiles.md5("${results}/index/caid.fst"),
+                                                 'manifest.json': TestFiles.md5("${results}/index/manifest.json")]
+            assert meta.regenerate.command_line == meta.pipeline.command_line
+
+            // A second build from the shard, in another directory, gives the same bytes as BUILD_INDEX's.
+            def (status, err) = checkRebuild(projectDir.toString(), results)
+            assert status == 0 : err
+            assert err.contains('rebuilt from keys/ byte for byte (1 shard(s))')
         }
         cleanup {
             registry?.close()
@@ -147,6 +229,7 @@ nextflow_pipeline {
                 chrom        = "MT"
                 regions      = "${projectDir}/tests/data/regions_MT.bed"
                 clinvar_vcf  = "${projectDir}/tests/data/clinvar_mini.vcf.gz"
+                cache        = "${projectDir}/tests/data/cache"
                 registry_url = registry.url
                 ucsc_base    = TestFiles.ucscMirror(projectDir, "${outputDir}/ucsc")
                 outdir       = "${outputDir}/results"
@@ -159,6 +242,17 @@ nextflow_pipeline {
             def manifest = new groovy.json.JsonSlurper().parse(new File("${results}/index/manifest.json"))
             assert manifest.sources == ['registry_bed_2026-10-03', 'clinvar_2026-10-19']
             assert manifest.harvest_date == '2026-10-01'
+            def meta = new groovy.json.JsonSlurper().parse(new File("${results}/index/metadata.json"))
+            assert meta.registry.registry_date == '2026-10-03'
+            assert meta.registry.harvest_date == '2026-10-01'
+            assert meta.rebuild.argv.contains('2026-10-01')
+            // tests/data/cache holds chr21 answers only: no MT site is answered from it, but the
+            // metadata records the directory and its file all the same
+            def chunk = "${projectDir}/tests/data/cache/chunk_00000.tsv"
+            assert meta.cache.directories == [[path: "${projectDir}/tests/data/cache".toString(),
+                files: [[name: 'chunk_00000.tsv', size: new File(chunk).length(), md5: TestFiles.md5(chunk)]]]]
+            assert meta.cache.digest == TestFiles.digest('SHA-256', "${TestFiles.md5(chunk)}  chunk_00000.tsv\n".getBytes('UTF-8'))
+            assert checkRebuild(projectDir.toString(), results)[0] == 0
             def summary = path("${results}/reports/summary.md").text
             assert summary.contains('- Registry date: 2026-10-03, the UTC day the earliest ENUMERATE task ran (manifest source registry_bed_2026-10-03)')
             assert summary.contains('- Harvest date: 2026-10-01, the UTC day the earliest ENUMERATE or LOOKUP task ran')
@@ -191,6 +285,7 @@ nextflow_pipeline {
             assert (workflow.stdout + workflow.stderr).join('\n').contains('enumerate MT: 1 windows file(s) gave no allele')
             assert !path("${results}/index").exists()
             assert !path("${results}/genome").exists()
+            assert !path("${results}/keys").exists()
             def summary = path("${results}/reports/summary.md").text
             assert summary.contains('Gate: **failed**')
             assert summary.contains('enumerate MT: 1 windows file(s) gave no allele')
@@ -220,6 +315,13 @@ nextflow_pipeline {
             assert workflow.success
             // the 7 harvested ClinVar alleles only
             assert new groovy.json.JsonSlurper().parse(new File("${results}/index/manifest.json")).entries == 7
+            // published with its shard, and a record of the failed check
+            assert path("${results}/keys/NC_012920.1.tsv.gz").exists()
+            def meta = new groovy.json.JsonSlurper().parse(new File("${results}/index/metadata.json"))
+            assert meta.checks.gate.passed == false
+            assert meta.checks.gate.allow_mismatches == true
+            assert meta.checks.gate.failures == ['enumerate MT: 1 windows file(s) gave no allele (has the Registry answer changed?)']
+            assert meta.outputs.keys[0].lines == 7
             assert path("${results}/reports/summary.md").text.contains('FINALIZE publishes index/ anyway (--allow_mismatches)')
         }
         cleanup {

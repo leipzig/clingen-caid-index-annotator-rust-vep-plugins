@@ -1,0 +1,34 @@
+// shellQuote (modules/metadata.nf): the rebuild command's words as a shell reads them back.
+
+nextflow_function {
+
+    name    "shellQuote"
+    script  "modules/metadata.nf"
+    function "shellQuote"
+    tag     "metadata"
+
+    [
+        'keys/NC_000021.9.tsv': 'keys/NC_000021.9.tsv',
+        'registry_pc_exons_2026-10-24': 'registry_pc_exons_2026-10-24',
+        '/data/genome dir/GRCh38.bin': "'/data/genome dir/GRCh38.bin'",
+        "it's": "'it'\\''s'",
+        '$HOME': "'\$HOME'",
+    ].each { word, quoted ->
+        test("shellQuote ${word}") {
+            when {
+                function {
+                    """
+                    input[0] = '${word.replace('\\', '\\\\').replace("'", "\\'").replace('$', '\\$')}'
+                    """
+                }
+            }
+            then {
+                assert function.success
+                assert function.result == quoted
+                // and bash reads it back as the word
+                def proc = ['bash', '-c', "printf '%s' ${function.result}"].execute()
+                assert proc.text == word
+            }
+        }
+    }
+}

@@ -1,0 +1,236 @@
+// metadataDocument (modules/metadata.nf) on the small task outputs of a run, made in the test:
+// one with a built genome, a BED, gnomAD and two --cache directories, one with a --genome given
+// and failed checks published with --allow_mismatches. The workflow tests check the same
+// document from real runs; these check every field and the rebuild command of both genomes.
+
+nextflow_function {
+
+    name    "metadataDocument"
+    script  "modules/metadata.nf"
+    function "metadataDocument"
+    tag     "metadata"
+
+    // The task outputs metadataDocument reads, under dir. genome: '../genome/GRCh38.bin' (built)
+    // or an absolute path (given).
+    def outputs = { String dir, String genome, List<String> sources, List<String> gate ->
+        def index = new File("${dir}/index")
+        index.mkdirs()
+        def manifest = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+            format_version: 1, assembly: 'GRCh38', sources: sources, harvest_date: '2026-10-24',
+            entries: 60, vareffect_version: '0.6.0', genome: genome,
+        ]))
+        new File(index, 'manifest.json').text = manifest
+        def digest = [
+            'tool\tclingen_index_version\tclingen-index 0.1.0',
+            'file\tindex\tcaid.fst\t624\t0123456789abcdef0123456789abcdef',
+            'file\tindex\tmanifest.json\t300\tfedcba9876543210fedcba9876543210',
+            'file\tgenome\tGRCh38.bin\t16700\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            'file\tgenome\tGRCh38.bin.idx\t60\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            'file\tfasta\thg38.fa.gz\t5500\tcccccccccccccccccccccccccccccccc',
+            'file\tcache1\tchunk_00001.tsv\t40\t11111111111111111111111111111111',
+            'file\tcache1\tchunk_00000.tsv\t30\t00000000000000000000000000000000',
+            'file\tcache2\tMT.tsv.gz\t50\t22222222222222222222222222222222',
+        ] + gate.collect { g -> "gate\t${g}".toString() }
+        return [
+            index: index.path,
+            digest: TestFiles.write("${dir}/digest.tsv", digest),
+            shards: [
+                TestFiles.write("${dir}/shard_NC_012920.1.tsv", [
+                    'file\tgz_md5\tgz_size\ttsv_md5\ttsv_size\tlines',
+                    'NC_012920.1.tsv.gz\t33333333333333333333333333333333\t900\t44444444444444444444444444444444\t2900\t58',
+                ]),
+                TestFiles.write("${dir}/shard_NC_000021.9.tsv", [
+                    'file\tgz_md5\tgz_size\ttsv_md5\ttsv_size\tlines',
+                    'NC_000021.9.tsv.gz\t55555555555555555555555555555555\t100\t66666666666666666666666666666666\t300\t2',
+                ]),
+            ],
+            stats: [TestFiles.write("${dir}/keys_MT.tsv", [
+                'chrom\taccession\tenum_files\tenumerated\tharvested\tkeys', 'MT\tNC_012920.1\t1\t58\t7\t58',
+            ])],
+            sources: TestFiles.write("${dir}/sources.tsv", [
+                'source\turl\tsize\tlast_modified\tmd5\tmd5_check',
+                'clinvar\tclinvar_mini.vcf.gz\t1234\t-\t99999999999999999999999999999999\tchecked',
+                'gnomad_genomes_MT\thttps://storage.googleapis.com/gcp-public-data--gnomad/release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz\t777\t-\td41d8cd98f00b204e9800998ecf8427e\tchecked',
+            ]),
+            coverage: TestFiles.write("${dir}/coverage.tsv", [
+                'chrom\tsource\tmeasure\tvalue', 'MT\tregistry\twindows\t2', 'MT\tregistry\talleles\t58', 'MT\tindex\tkeys\t58',
+            ]),
+            regions: TestFiles.write("${dir}/summary.tsv", [
+                'chrom\tintervals\tmerged\twindows\tcore_bp\tquery_bp', 'MT\t2\t2\t2\t1700\t2500',
+            ]),
+            provenance: [
+                TestFiles.write("${dir}/clinvar_date.txt", ['2026-10-19']),
+                TestFiles.write("${dir}/gnomad_files.tsv", [
+                    'gnomad_genomes\tMT\thttps://storage.googleapis.com/gcp-public-data--gnomad/release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz\t1B2M2Y8AsgTpgAmY7PhCfg==\t777',
+                ]),
+            ],
+        ]
+    }
+
+    // The function's inputs as Nextflow code: launch, run and parts.
+    def inputBlock = { Map files, String runExtra, String genomeList, String cacheList ->
+        """
+        def launch = [
+            pipeline: [git_commit: 'f812807395311d207a2b851390297a429c69c56f', git_dirty: false, source_digest: 'abc',
+                       nextflow_version: '26.04.7', command_line: 'nextflow run pipeline --chrom MT', profile: 'local',
+                       run_name: 'test_run', session_id: 'session', launch_dir: '/launch', project_dir: '/launch/pipeline',
+                       work_dir: '/launch/work', start: '2026-10-24T22:31:28Z', container: 'clingen-index:0.1.0',
+                       container_engine: 'docker'],
+            params: [chrom: 'MT', registry_url: 'https://reg.genome.network', ucsc_base: 'https://hgdownload.soe.ucsc.edu/goldenPath/hg38',
+                     gnomad_version: 'latest', gnomad_mirror: 'gcs', clinvar_vcf: 'clinvar_mini.vcf.gz'],
+        ]
+        def run = [
+            chroms: ['MT'],
+            windowing: [set: 'bed', pad: 20, merge_gap: 5000, max_window: 50000, flank: 200, per_task: 500],
+            paging: [page_size: 200000, split_overlap: 1000],
+            batch_size: 2000000,
+            datasets: ['clinvar', 'gnomad_genomes'],
+            include_reference: false,
+            genome: ${genomeList},
+            cache: ${cacheList},
+            ${runExtra}
+        ]
+        def parts = [
+            index: file('${files.index}'),
+            digest: file('${files.digest}'),
+            shards: [${files.shards.collect { "file('${it}')" }.join(', ')}],
+            stats: [file('${files.stats[0]}')],
+            sources: file('${files.sources}'),
+            coverage: file('${files.coverage}'),
+            regions: file('${files.regions}'),
+            provenance: [${files.provenance.collect { "file('${it}')" }.join(', ')}],
+            dates: [registry: '2026-10-24', harvest: '2026-10-23'],
+            statuses: ['reach:MT:0', 'validate:MT:0'],
+        ]
+        input[0] = launch
+        input[1] = run
+        input[2] = parts
+        """
+    }
+
+    test("metadataDocument of a built genome, a BED, gnomAD and two caches carries every field") {
+        def bed
+        when {
+            def files = outputs("${outputDir}", '../genome/GRCh38.bin', ['registry_bed_2026-10-24', 'clinvar_2026-10-19', 'gnomad_genomes_v3.1'], [])
+            bed = TestFiles.write("${outputDir}/regions_MT.bed", ['chrM\t3000\t3100', 'chrM\t4000\t4100'])
+            new File("${outputDir}/chunks").mkdirs()
+            new File("${outputDir}/harvest").mkdirs()
+            function {
+                inputBlock(files, "bed: file('${bed}'), allow_mismatches: false,", 'null',
+                    "[file('${outputDir}/chunks'), file('${outputDir}/harvest')]")
+            }
+        }
+        then {
+            assert function.success
+            def text = function.result.toString()
+            def m = new groovy.json.JsonSlurper().parseText(text)
+            // empty containers are written as [] and {}, not over three lines
+            assert !(text =~ /\[\n *\n *\]/) && !(text =~ /\{\n *\n *\}/)
+            assert text.contains('"failures": []')
+
+            assert m.format_version == 1
+            assert m.keySet().toList() == ['format_version', 'about', 'pipeline', 'tool', 'params', 'regions', 'registry',
+                'sources', 'cache', 'outputs', 'checks', 'rebuild', 'regenerate']
+
+            ['git_commit', 'git_dirty', 'source_digest', 'nextflow_version', 'command_line', 'profile', 'run_name',
+             'session_id', 'launch_dir', 'project_dir', 'work_dir', 'start', 'container', 'container_engine', 'written'].each {
+                assert m.pipeline.containsKey(it)
+            }
+            assert m.pipeline.written ==~ /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/
+            assert m.tool.clingen_index_version == 'clingen-index 0.1.0'
+            assert m.tool.vareffect_version == '0.6.0'
+            assert m.params.chrom == 'MT'
+
+            assert m.regions.set == 'bed'
+            assert m.regions.bed == [name: 'regions_MT.bed', path: bed, md5: TestFiles.md5(bed)]
+            assert [m.regions.pad, m.regions.merge_gap, m.regions.max_window, m.regions.flank] == [20, 5000, 50000, 200]
+            assert m.regions.chromosomes == ['MT']
+            assert [m.regions.windows, m.regions.core_bp, m.regions.query_bp] == [2, 1700, 2500]
+            assert m.regions.per_chromosome.MT == [intervals: 2, merged: 2, windows: 2, core_bp: 1700, query_bp: 2500]
+
+            assert m.registry.base_url == 'https://reg.genome.network'
+            assert m.registry.registry_date == '2026-10-24'
+            assert m.registry.harvest_date == '2026-10-23'
+            assert [m.registry.page_size, m.registry.split_overlap, m.registry.include_reference] == [200000, 1000, false]
+
+            assert m.sources.downloads.size() == 2
+            assert m.sources.downloads[0] == [source: 'clinvar', url: 'clinvar_mini.vcf.gz', size: 1234, last_modified: '-',
+                md5: '99999999999999999999999999999999', md5_check: 'checked']
+            assert m.sources.clinvar.release == '2026-10-19'
+            assert m.sources.gnomad.files == [[dataset: 'gnomad_genomes', chrom: 'MT',
+                url: 'https://storage.googleapis.com/gcp-public-data--gnomad/release/3.1/vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz',
+                md5_base64: '1B2M2Y8AsgTpgAmY7PhCfg==', md5: 'd41d8cd98f00b204e9800998ecf8427e', size: 777]]
+            assert m.sources.genome.built == true
+            assert m.sources.genome.fasta.url == 'https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz'
+            assert m.sources.genome.fasta.md5 == 'cccccccccccccccccccccccccccccccc'
+            assert m.sources.genome.files*.name == ['GRCh38.bin', 'GRCh38.bin.idx']
+            assert m.sources.genome.files[0].md5 == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+            assert m.sources.genome.files[0].size == 16700
+
+            // in --cache order, files in byte order; the digest from names and md5s alone
+            assert m.cache.directories*.path == ["${outputDir}/chunks".toString(), "${outputDir}/harvest".toString()]
+            assert m.cache.directories[0].files == [
+                [name: 'chunk_00000.tsv', size: 30, md5: '00000000000000000000000000000000'],
+                [name: 'chunk_00001.tsv', size: 40, md5: '11111111111111111111111111111111'],
+            ]
+            assert m.cache.directories[1].files*.name == ['MT.tsv.gz']
+            def cacheText = '00000000000000000000000000000000  chunk_00000.tsv\n11111111111111111111111111111111  chunk_00001.tsv\n' +
+                '22222222222222222222222222222222  MT.tsv.gz\n'
+            assert m.cache.digest == TestFiles.digest('SHA-256', cacheText.getBytes('UTF-8'))
+            assert m.cache.note.contains('fetched before this run')
+
+            assert m.outputs.index == ['caid.fst': [size: 624, md5: '0123456789abcdef0123456789abcdef'],
+                                       'manifest.json': [size: 300, md5: 'fedcba9876543210fedcba9876543210']]
+            assert m.outputs.entries == 60
+            assert m.outputs.keys*.file == ['NC_000021.9.tsv.gz', 'NC_012920.1.tsv.gz']
+            assert m.outputs.keys[1] == [file: 'NC_012920.1.tsv.gz', md5: '33333333333333333333333333333333', size: 900,
+                tsv_md5: '44444444444444444444444444444444', tsv_size: 2900, lines: 58]
+            assert m.outputs.keys_bytes == 1000
+
+            assert m.checks.gate == [passed: true, failures: [], allow_mismatches: false, published: true]
+            assert m.checks.statuses == ['reach:MT:0', 'validate:MT:0']
+            assert m.checks.keys.MT == [accession: 'NC_012920.1', enum_files: 1, enumerated: 58, harvested: 7, keys: 58]
+            assert m.checks.per_chromosome.MT == ['registry:windows': 2, 'registry:alleles': 58, 'index:keys': 58]
+
+            // shards in accession order; the built genome through a real genome/ beside index/
+            assert m.rebuild.argv == ['clingen-index', 'build', '--sorted', 'keys/NC_000021.9.tsv', 'keys/NC_012920.1.tsv',
+                '--out', 'index', '--source', 'registry_bed_2026-10-24', '--source', 'clinvar_2026-10-19',
+                '--source', 'gnomad_genomes_v3.1', '--harvest-date', '2026-10-24', '--genome', 'genome/GRCh38.bin', '--genome-relative']
+            assert m.rebuild.command == m.rebuild.argv.join(' ')
+            assert m.rebuild.genome.relative == true
+            assert m.rebuild.steps.any { it.contains('ln -s <outdir>/genome/GRCh38.bin <outdir>/genome/GRCh38.bin.idx genome/') }
+            assert m.rebuild.expected_md5 == ['caid.fst': '0123456789abcdef0123456789abcdef', 'manifest.json': 'fedcba9876543210fedcba9876543210']
+            assert m.rebuild.manifest_identical == true
+            assert m.regenerate.command_line == 'nextflow run pipeline --chrom MT'
+            assert m.regenerate.note.contains('regenerates the index rather than reproducing it')
+        }
+    }
+
+    test("metadataDocument of a given genome and failed checks published with allow_mismatches") {
+        when {
+            def files = outputs("${outputDir}", "/data/genome dir/GRCh38.bin", ['registry_pc_exons_2026-10-24', 'clinvar_2026-10-19'],
+                ['reach MT: exit 1 (see reports/reach_MT.txt)'])
+            new File("${outputDir}/genome").mkdirs()
+            function {
+                inputBlock(files, "bed: null, allow_mismatches: true,",
+                    "[file('${outputDir}/genome/GRCh38.bin'), file('${outputDir}/genome/GRCh38.bin.idx')]", '[]')
+            }
+        }
+        then {
+            assert function.success
+            def m = new groovy.json.JsonSlurper().parseText(function.result.toString())
+            assert m.regions.bed == null
+            assert m.sources.genome.built == false
+            assert m.sources.genome.path == "${outputDir}/genome/GRCh38.bin".toString()
+            assert m.cache.directories == []
+            assert m.cache.digest == null
+            assert m.checks.gate == [passed: false, failures: ['reach MT: exit 1 (see reports/reach_MT.txt)'],
+                                     allow_mismatches: true, published: true]
+            // a given genome by the absolute path build recorded, quoted for the shell
+            assert m.rebuild.argv[-2..-1] == ['--genome', '/data/genome dir/GRCh38.bin']
+            assert m.rebuild.command.endsWith("--genome '/data/genome dir/GRCh38.bin'")
+            assert m.rebuild.genome.relative == false
+            assert !m.rebuild.steps.any { it.contains('ln -s') }
+        }
+    }
+}

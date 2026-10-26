@@ -1,0 +1,46 @@
+// gitRecord (modules/metadata.nf): the commit of the checkout holding projectDir, and nulls for
+// a directory outside any checkout (an rsync'd copy of pipeline/, which source_digest identifies).
+
+nextflow_function {
+
+    name    "gitRecord"
+    script  "modules/metadata.nf"
+    function "gitRecord"
+    tag     "metadata"
+
+    test("gitRecord of this checkout") {
+        when {
+            function {
+                """
+                input[0] = '${projectDir}'
+                """
+            }
+        }
+        then {
+            assert function.success
+            def proc = ['git', '-C', projectDir.toString(), 'rev-parse', 'HEAD'].execute()
+            assert function.result.commit == proc.text.trim()
+            assert function.result.dirty instanceof Boolean
+        }
+    }
+
+    // outputDir is inside this checkout, so the directory is made in the system's temporary one.
+    test("gitRecord of a directory outside any checkout") {
+        def copy
+        when {
+            copy = java.nio.file.Files.createTempDirectory('pipeline-copy').toFile()
+            function {
+                """
+                input[0] = '${copy}'
+                """
+            }
+        }
+        then {
+            assert function.success
+            assert function.result == [commit: null, dirty: null]
+        }
+        cleanup {
+            copy?.delete()
+        }
+    }
+}

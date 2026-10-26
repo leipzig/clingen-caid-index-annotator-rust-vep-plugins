@@ -1,6 +1,7 @@
-// FINALIZE on a stand-in index and genome made in the test: it publishes them only when every
-// check passed and every chromosome with windows enumerated an allele (Ruling R8), or when
-// allow_mismatches says to anyway.
+// FINALIZE on a stand-in index, genome and key shard made in the test: it publishes them, with
+// index/metadata.json written from the text it is given, only when every check passed and every
+// chromosome with windows enumerated an allele (Ruling R8), or when allow_mismatches says to
+// anyway; otherwise it publishes none of them.
 
 nextflow_process {
 
@@ -17,7 +18,7 @@ nextflow_process {
         ])
     }
 
-    // The index, genome and REPORT summary FINALIZE stages, as Nextflow code.
+    // The index files, genome, shard and REPORT summary FINALIZE stages, as Nextflow code.
     def inputs = { String dir ->
         def index = new File("${dir}/index")
         index.mkdirs()
@@ -25,59 +26,78 @@ nextflow_process {
         new File(index, 'manifest.json').text = '{}'
         def bin = TestFiles.write("${dir}/genome/GRCh38.bin", ['bin'])
         def idx = TestFiles.write("${dir}/genome/GRCh38.bin.idx", ['idx'])
+        def shard = TestFiles.write("${dir}/keys/NC_012920.1.tsv.gz", ['NC_012920.1:m.3308T>C\tCA340945'])
         def summary = TestFiles.write("${dir}/reports/summary.md", ['# summary'])
-        return [index: "file('${index}')", genome: "[file('${bin}'), file('${idx}')]", summary: "file('${summary}')"]
+        return [
+            index: "[file('${index}/caid.fst'), file('${index}/manifest.json')]",
+            genome: "[file('${bin}'), file('${idx}')]",
+            shards: "[file('${shard}')]",
+            summary: "file('${summary}')",
+        ]
     }
 
-    test("FINALIZE publishes the index and the built genome when every check passed") {
+    // The metadata text FINALIZE writes, with a quote, a backslash and a dollar the shell must
+    // leave alone, as a Groovy string literal for the process block.
+    def metadata = '{\n    "format_version": 1,\n    "command": "echo \'$HOME\' \\\\ `date`"\n}'
+    def metadataLiteral = "'''" + metadata.replace('\\', '\\\\') + "'''"
+
+    // The process block: the inputs in FINALIZE's order.
+    def block = { Map staged, String genome, String statuses, String statsFile, String allow ->
+        """
+        input[0] = ${staged.index}
+        input[1] = ${genome}
+        input[2] = ${staged.shards}
+        input[3] = ${statuses}
+        input[4] = [file('${statsFile}')]
+        input[5] = ${allow}
+        input[6] = ${metadataLiteral}
+        input[7] = ${staged.summary}
+        """
+    }
+
+    test("FINALIZE publishes the index, its metadata, the shards and the built genome when every check passed") {
         when {
             params {
                 outdir = "${outputDir}/results"
             }
             def staged = inputs("${outputDir}/in")
             process {
-                """
-                input[0] = ${staged.index}
-                input[1] = ${staged.genome}
-                input[2] = ['reach:MT:0', 'validate:MT:0']
-                input[3] = [file('${stats("${outputDir}/in", 'MT', 1, 58)}')]
-                input[4] = false
-                input[5] = ${staged.summary}
-                """
+                block(staged, staged.genome, "['reach:MT:0', 'validate:MT:0']", stats("${outputDir}/in", 'MT', 1, 58), 'false')
             }
         }
         then {
             assert process.success
-            assert path("${outputDir}/results/index/caid.fst").text == 'fst'
-            assert path("${outputDir}/results/index/manifest.json").exists()
-            assert path("${outputDir}/results/genome/GRCh38.bin").exists()
-            assert path("${outputDir}/results/genome/GRCh38.bin.idx").exists()
+            def results = "${outputDir}/results"
+            assert path("${results}/index/caid.fst").text == 'fst'
+            assert path("${results}/index/manifest.json").exists()
+            // written as given: the shell expanded nothing
+            assert path("${results}/index/metadata.json").text == metadata + '\n'
+            assert new File("${results}/index").list().toList().toSorted() == ['caid.fst', 'manifest.json', 'metadata.json']
+            // keys/ holds the shards only, not the KEYS stats FINALIZE also stages
+            assert new File("${results}/keys").list().toList() == ['NC_012920.1.tsv.gz']
+            assert TestFiles.lines("${results}/keys/NC_012920.1.tsv.gz") == ['NC_012920.1:m.3308T>C\tCA340945']
+            assert path("${results}/genome/GRCh38.bin").exists()
+            assert path("${results}/genome/GRCh38.bin.idx").exists()
         }
     }
 
-    test("FINALIZE stops on a failing status") {
+    test("FINALIZE stops on a failing status and publishes neither index/ nor keys/") {
         when {
             params {
                 outdir = "${outputDir}/results"
             }
             def staged = inputs("${outputDir}/in")
             process {
-                """
-                input[0] = ${staged.index}
-                input[1] = []
-                input[2] = ['reach:MT:1', 'validate:MT:0']
-                input[3] = [file('${stats("${outputDir}/in", 'MT', 1, 58)}')]
-                input[4] = false
-                input[5] = ${staged.summary}
-                """
+                block(staged, '[]', "['reach:MT:1', 'validate:MT:0']", stats("${outputDir}/in", 'MT', 1, 58), 'false')
             }
         }
         then {
             assert process.failed
-            assert process.errorReport.contains('not publishing index/')
+            assert process.errorReport.contains('not publishing index/ or keys/')
             assert process.errorReport.contains('reach MT: exit 1')
             assert !process.errorReport.contains('validate MT')
             assert !path("${outputDir}/results/index").exists()
+            assert !path("${outputDir}/results/keys").exists()
         }
     }
 
@@ -90,20 +110,14 @@ nextflow_process {
             }
             def staged = inputs("${outputDir}/in")
             process {
-                """
-                input[0] = ${staged.index}
-                input[1] = []
-                input[2] = ['reach:MT:0', 'validate:MT:0']
-                input[3] = [file('${stats("${outputDir}/in", 'MT', 2, 0)}')]
-                input[4] = false
-                input[5] = ${staged.summary}
-                """
+                block(staged, '[]', "['reach:MT:0', 'validate:MT:0']", stats("${outputDir}/in", 'MT', 2, 0), 'false')
             }
         }
         then {
             assert process.failed
             assert process.errorReport.contains('enumerate MT: 2 windows file(s) gave no allele')
             assert !path("${outputDir}/results/index").exists()
+            assert !path("${outputDir}/results/keys").exists()
         }
     }
 
@@ -114,22 +128,18 @@ nextflow_process {
             }
             def staged = inputs("${outputDir}/in")
             process {
-                """
-                input[0] = ${staged.index}
-                input[1] = []
-                input[2] = ['reach:MT:1', 'validate:MT:1']
-                input[3] = [file('${stats("${outputDir}/in", 'MT', 2, 0)}')]
-                input[4] = true
-                input[5] = ${staged.summary}
-                """
+                block(staged, '[]', "['reach:MT:1', 'validate:MT:1']", stats("${outputDir}/in", 'MT', 2, 0), 'true')
             }
         }
         then {
             assert process.success
             assert path("${outputDir}/results/index/caid.fst").text == 'fst'
+            assert path("${outputDir}/results/index/metadata.json").exists()
+            assert path("${outputDir}/results/keys/NC_012920.1.tsv.gz").exists()
             assert !path("${outputDir}/results/genome").exists()
             // the task's own stderr, in its work directory
-            def stderr = new File(new File(process.out.index[0]).parentFile, '.command.err').text
+            // (keys emits a list of shards, arity 1..*)
+            def stderr = new File(new File(process.out.keys[0][0].toString()).parentFile.parentFile, '.command.err').text
             assert stderr.contains('publishing despite failed checks (--allow_mismatches)')
             assert stderr.contains('reach MT: exit 1')
             assert stderr.contains('enumerate MT: 2 windows file(s) gave no allele')
@@ -145,19 +155,31 @@ nextflow_process {
             }
             def staged = inputs("${outputDir}/in")
             process {
-                """
-                input[0] = ${staged.index}
-                input[1] = []
-                input[2] = ['reach:MT:1']
-                input[3] = [file('${stats("${outputDir}/in", 'MT', 1, 58)}')]
-                input[4] = 'false'
-                input[5] = ${staged.summary}
-                """
+                block(staged, '[]', "['reach:MT:1']", stats("${outputDir}/in", 'MT', 1, 58), "'false'")
             }
         }
         then {
             assert process.failed
             assert (process.stdout + process.stderr).join('\n').contains("allow_mismatches must be a Boolean, not String 'false'")
+        }
+    }
+
+    // The here-document that writes the metadata ends at its delimiter line, so a text holding
+    // that line would be cut short; FINALIZE refuses it by name.
+    test("FINALIZE refuses metadata holding the here-document's delimiter") {
+        when {
+            params {
+                outdir = "${outputDir}/results"
+            }
+            def staged = inputs("${outputDir}/in")
+            process {
+                block(staged, '[]', "['reach:MT:0']", stats("${outputDir}/in", 'MT', 1, 58), 'false')
+                    .replace("input[6] = ${metadataLiteral}", "input[6] = '{\\nEND_OF_METADATA_JSON\\n}'")
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).join('\n').contains('metadata holds the line END_OF_METADATA_JSON')
         }
     }
 
@@ -169,19 +191,14 @@ nextflow_process {
             }
             def staged = inputs("${outputDir}/in")
             process {
-                """
-                input[0] = ${staged.index}
-                input[1] = []
-                input[2] = ['reach:MT:1']
-                input[3] = [file('${stats("${outputDir}/in", 'MT', 1, 0)}')]
-                input[4] = false
-                input[5] = ${staged.summary}
-                """
+                block(staged, '[]', "['reach:MT:1']", stats("${outputDir}/in", 'MT', 1, 0), 'false')
             }
         }
         then {
             assert process.success
             assert path("${outputDir}/results/index/caid.fst").exists()
+            assert path("${outputDir}/results/index/metadata.json").text == metadata + '\n'
+            assert path("${outputDir}/results/keys/NC_012920.1.tsv.gz").exists()
         }
     }
 }

@@ -21,6 +21,24 @@ class TestFiles {
         return input.withReader('UTF-8') { it.readLines() }
     }
 
+    /** The md5 of a file's bytes, as lowercase hex. */
+    static String md5(Object path) {
+        return digest('MD5', new File(path.toString()).bytes)
+    }
+
+    /** The md5 of a gzip file's unpacked bytes, as lowercase hex. */
+    static String gunzippedMd5(Object path) {
+        def bytes = new GZIPInputStream(new File(path.toString()).newInputStream()).withCloseable { it.readAllBytes() }
+        return digest('MD5', bytes)
+    }
+
+    /** A digest (MD5, SHA-256) of bytes, as lowercase hex. */
+    static String digest(String algorithm, byte[] bytes) {
+        def md = java.security.MessageDigest.getInstance(algorithm)
+        md.update(bytes)
+        return md.digest().encodeHex().toString()
+    }
+
     /** Writes lines to a file, gzipped if its name ends in .gz; returns its path. */
     static String write(Object path, List<String> lines) {
         def file = new File(path.toString())

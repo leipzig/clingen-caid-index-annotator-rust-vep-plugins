@@ -12,7 +12,7 @@ nextflow_pipeline {
     def allProcesses = [
         'FETCH_UCSC', 'REGIONS', 'ENUMERATE',
         'RESOLVE_GNOMAD', 'GNOMAD_SITES', 'CLINVAR_SITES', 'SPLIT_CACHE', 'MERGE_SITES', 'LOOKUP', 'COLLECT',
-        'FETCH_FASTA', 'BUILD_GENOME', 'KEYS', 'BUILD_INDEX', 'VALIDATE', 'REACH', 'FINALIZE', 'REPORT',
+        'FETCH_FASTA', 'BUILD_GENOME', 'KEYS', 'SHARD', 'BUILD_INDEX', 'VALIDATE', 'REACH', 'DIGEST', 'FINALIZE', 'REPORT',
     ]
 
     test("help prints the parameters") {
@@ -201,6 +201,12 @@ nextflow_pipeline {
             assert counts == expected
             assert path("$outputDir/index/caid.fst").exists()
             assert path("$outputDir/index/manifest.json").exists()
+            assert path("$outputDir/keys/NC_000021.9.tsv.gz").exists()
+            def meta = new groovy.json.JsonSlurper().parse(new File("$outputDir/index/metadata.json"))
+            assert meta.format_version == 1
+            assert meta.pipeline.stub_run == true
+            assert meta.sources.datasets == ['clinvar', 'gnomad_genomes', 'gnomad_exomes']
+            assert meta.cache.directories*.path == ["${projectDir}/tests/data/cache".toString()]
             assert path("$outputDir/genome/GRCh38.bin").exists()
             assert path("$outputDir/genome/GRCh38.bin.idx").exists()
             assert path("$outputDir/harvest/21.tsv.gz").exists()
@@ -225,7 +231,7 @@ nextflow_pipeline {
         }
         then {
             def counts = workflow.trace.tasks().countBy { it.name.tokenize(' ')[0].tokenize(':')[-1] }
-            def perChrom = ['ENUMERATE', 'MERGE_SITES', 'LOOKUP', 'COLLECT', 'KEYS', 'VALIDATE', 'REACH']
+            def perChrom = ['ENUMERATE', 'MERGE_SITES', 'LOOKUP', 'COLLECT', 'KEYS', 'SHARD', 'VALIDATE', 'REACH']
             // gnomAD v4 has no chrM: MT streams v3.1 genomes and no exomes.
             def expected = allProcesses.collectEntries { [it, 1] } +
                 perChrom.collectEntries { [it, 25] } + [GNOMAD_SITES: 49]
@@ -236,6 +242,11 @@ nextflow_pipeline {
             assert path("$outputDir/reports/reach_X.txt").exists()
             assert path("$outputDir/reports/summary.md").exists()
             assert path("$outputDir/index/caid.fst").exists()
+            // one shard per chromosome, all listed in the metadata
+            assert new File("$outputDir/keys").list().size() == 25
+            def meta = new groovy.json.JsonSlurper().parse(new File("$outputDir/index/metadata.json"))
+            assert meta.outputs.keys.size() == 25
+            assert meta.rebuild.argv.count { it.startsWith('keys/') } == 25
         }
     }
 

@@ -1,0 +1,80 @@
+// SHARD on tests/data/pairs_MT.tsv (the 58 byte-sorted MT pairs) as KEYS hands it on, named
+// NC_012920.1.tsv: the gzipped copy FINALIZE publishes in keys/, and the row of md5s and counts
+// index/metadata.json records for it.
+
+nextflow_process {
+
+    name    "SHARD"
+    script  "modules/index.nf"
+    process "SHARD"
+    tag     "index"
+
+    test("SHARD gzips the shard without name or time and records its md5s and lines") {
+        def shard
+        when {
+            shard = TestFiles.write("${outputDir}/in/NC_012920.1.tsv", path("${projectDir}/tests/data/pairs_MT.tsv").readLines())
+            process {
+                """
+                input[0] = file('${shard}')
+                """
+            }
+        }
+        then {
+            assert process.success
+            def gz = new File(process.out.gz[0].toString())
+            assert gz.name == 'NC_012920.1.tsv.gz'
+            assert gz.parentFile.name == 'keys'
+            assert TestFiles.lines(gz) == path(shard).readLines()
+
+            // gzip -n: the header's FLG has no FNAME bit (0x08) and MTIME (bytes 4-7) is zero, so
+            // the same lines give the same bytes with the same gzip.
+            def bytes = gz.bytes
+            assert (bytes[3] & 0x08) == 0
+            assert bytes[4..7].every { it == 0 }
+
+            def rows = path(process.out.row[0]).readLines()
+            assert new File(process.out.row[0].toString()).name == 'shard_NC_012920.1.tsv'
+            assert rows[0] == 'file\tgz_md5\tgz_size\ttsv_md5\ttsv_size\tlines'
+            assert rows[1].split('\t') as List == [
+                'NC_012920.1.tsv.gz', TestFiles.md5(gz), gz.length().toString(),
+                TestFiles.md5(shard), new File(shard).length().toString(), '58',
+            ]
+        }
+    }
+
+    // A chromosome with no key at all (a BED that misses it, a dataset with nothing there) still
+    // gets a shard, so keys/ has one per chromosome of the index.
+    test("SHARD of an empty shard") {
+        when {
+            process {
+                """
+                input[0] = file('${TestFiles.write("${outputDir}/in/NC_000024.10.tsv", [])}')
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert TestFiles.lines(process.out.gz[0]) == []
+            def row = path(process.out.row[0]).readLines()[1].split('\t') as List
+            assert row[0] == 'NC_000024.10.tsv.gz'
+            assert row[3] == 'd41d8cd98f00b204e9800998ecf8427e'
+            assert row[4..5] == ['0', '0']
+        }
+    }
+
+    test("stub: SHARD") {
+        options "-stub"
+        when {
+            process {
+                """
+                input[0] = file('${TestFiles.write("${outputDir}/in/NC_012920.1.tsv", [])}')
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert new File(process.out.gz[0].toString()).name == 'NC_012920.1.tsv.gz'
+            assert path(process.out.row[0]).readLines()[1].startsWith('NC_012920.1.tsv.gz\t')
+        }
+    }
+}
