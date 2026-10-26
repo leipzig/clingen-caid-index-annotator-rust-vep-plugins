@@ -13,10 +13,20 @@
 #     the published <outdir>/index/ files.
 # It names every difference and exits 1 if there is one (2 for a usage or setup error).
 #
+# A --genome given is recorded in manifest.json by its absolute path on the launcher, and build
+# refuses a --genome that does not exist. Where that path cannot be made, GENOME_STANDIN=<file>
+# rebuilds with that file in its place (build records the path and does not read the file):
+# caid.fst must still match byte for byte, and manifest.json once the rebuilt genome value is put
+# back to the recorded one. The last line says which of the two checks were made.
+#
 # clingen-index is taken from PATH; CLINGEN_INDEX overrides it with a command (split on spaces),
 # e.g. CLINGEN_INDEX='apptainer exec clingen-index.sif clingen-index' on a cluster, where the
-# temporary directory (TMPDIR) and <outdir> must be visible inside the container. Use the
-# release that metadata.json's tool.clingen_index_version names. Needs jq, gzip and md5sum (or md5).
+# temporary directory (TMPDIR) and <outdir> must be visible inside the container. The binary
+# that built the index is named by metadata.json's tool.clingen_index_sha256, not by its version
+# string (the crate's, not raised with each change to crates/); tool.note says how to build it.
+# A clingen-index from PATH is compared with that sha256 and the result printed; another build
+# may still give the same bytes, and the md5s decide. Needs jq, gzip, md5sum (or md5) and
+# openssl.
 
 set -euo pipefail
 
@@ -100,7 +110,11 @@ fi
 # The genome: a built one is linked into a real genome/ beside index/; a given one must exist at
 # the absolute path the manifest records.
 recorded=$(jq -r '.rebuild.genome.recorded // empty' "$meta")
+standin=
 if [[ $(jq -r '.rebuild.genome.relative' "$meta") == true ]]; then
+    if [[ -n ${GENOME_STANDIN:-} ]]; then
+        echo "check_rebuild: note: GENOME_STANDIN unused: the genome is the built one in $out/genome/" >&2
+    fi
     mkdir "$work/genome"
     for f in GRCh38.bin GRCh38.bin.idx; do
         if [[ ! -f $out/genome/$f ]]; then
@@ -109,25 +123,62 @@ if [[ $(jq -r '.rebuild.genome.relative' "$meta") == true ]]; then
         fi
         ln -s "$out/genome/$f" "$work/genome/$f"
     done
+elif [[ -n $recorded && -n ${GENOME_STANDIN:-} ]]; then
+    if [[ ! -f $GENOME_STANDIN ]]; then
+        echo "check_rebuild: GENOME_STANDIN=$GENOME_STANDIN: no such file" >&2
+        exit 2
+    fi
+    standin=$GENOME_STANDIN
 elif [[ -n $recorded && ! -e $recorded ]]; then
     echo "check_rebuild: the manifest records the genome $recorded, which does not exist here; build refuses a" >&2
-    echo "missing --genome (any file at that path will do: build records the path and does not read it)" >&2
+    echo "missing --genome (any file at that path will do: build records the path and does not read it)." >&2
+    echo "Set GENOME_STANDIN=<any file> to rebuild with that file instead and check manifest.json apart from" >&2
+    echo "its genome value." >&2
     exit 2
 fi
 
 # The rebuild command, word by word from metadata.json, with argv[0] (clingen-index) as given.
+# With GENOME_STANDIN, the word after --genome (the recorded path) is replaced by the stand-in.
 args=()
-while IFS= read -r a; do args+=("$a"); done < <(jq -r '.rebuild.argv[1:][]' "$meta")
+prev=
+while IFS= read -r a; do
+    if [[ $prev == --genome && -n $standin ]]; then a=$standin; fi
+    args+=("$a")
+    prev=$a
+done < <(jq -r '.rebuild.argv[1:][]' "$meta")
 echo "check_rebuild: in $work:" >&2
-echo "  ${tool[*]} $(jq -r '.rebuild.command' "$meta" | cut -d' ' -f2-)" >&2
+echo "  ${tool[*]} ${args[*]}" >&2
 version=$("${tool[@]}" --version)
 recorded_version=$(jq -r '.tool.clingen_index_version' "$meta")
 if [[ $version != "$recorded_version" ]]; then
     echo "check_rebuild: note: ${tool[*]} is '$version'; the run's was '$recorded_version'" >&2
 fi
+recorded_sha=$(jq -r '.tool.clingen_index_sha256 // empty' "$meta")
+if [[ ${#tool[@]} -eq 1 && -n $recorded_sha ]]; then
+    sha=$(openssl dgst -sha256 -r "$(command -v "${tool[0]}")" | awk '{ print $1 }')
+    if [[ $sha == "$recorded_sha" ]]; then
+        echo "check_rebuild: ${tool[0]} is the binary that built the index (sha256 $sha)" >&2
+    else
+        echo "check_rebuild: note: ${tool[0]} has sha256 $sha; the run's ($(jq -r '.tool.platform' "$meta")) had $recorded_sha" >&2
+    fi
+fi
 if ! (cd "$work" && "${tool[@]}" "${args[@]}"); then
     echo "check_rebuild: the rebuild command failed in $work" >&2
     exit 2
+fi
+
+# With a stand-in genome, the rebuilt manifest's genome value (the stand-in as build recorded
+# it, its directory resolved) is put back to the recorded one, byte for byte as JSON strings, so
+# every other byte of manifest.json is still compared.
+manifest_check="manifest.json byte for byte"
+if [[ -n $standin ]]; then
+    rebuilt_genome=$(jq -r '.genome' "$work/index/manifest.json")
+    mv "$work/index/manifest.json" "$work/manifest.standin.json"
+    # Through the environment, as awk -v would read backslash escapes in the values.
+    FROM="\"genome\": $(jq -n --arg g "$rebuilt_genome" '$g')" TO="\"genome\": $(jq -n --arg g "$recorded" '$g')" awk '
+        { i = index($0, ENVIRON["FROM"]); if (i) { $0 = substr($0, 1, i - 1) ENVIRON["TO"] substr($0, i + length(ENVIRON["FROM"])) } print }
+    ' "$work/manifest.standin.json" > "$work/index/manifest.json"
+    manifest_check="manifest.json byte for byte apart from its genome value (rebuilt with GENOME_STANDIN=$standin, which build recorded as $rebuilt_genome)"
 fi
 
 for f in caid.fst manifest.json; do
@@ -144,4 +195,9 @@ if [[ ${#failures[@]} -gt 0 ]]; then
     printf '  %s\n' "${failures[@]}" >&2
     exit 1
 fi
-echo "check_rebuild: $out/index rebuilt from keys/ byte for byte ($n shard(s))" >&2
+if [[ -n $standin ]]; then
+    echo "check_rebuild: $out/index rebuilt from keys/ with a stand-in genome ($n shard(s))" >&2
+else
+    echo "check_rebuild: $out/index rebuilt from keys/ byte for byte ($n shard(s))" >&2
+fi
+echo "check_rebuild: checked caid.fst byte for byte; $manifest_check" >&2
