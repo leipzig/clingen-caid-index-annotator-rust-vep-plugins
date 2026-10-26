@@ -238,6 +238,50 @@ process KEYS {
     """
 }
 
+process SHARD {
+    tag "${shard.baseName}"
+    label 'small'
+
+    input:
+    path shard   // <accession>.tsv of KEYS: the pairs build --sorted reads for one chromosome
+
+    output:
+    // keys/<accession>.tsv.gz, which FINALIZE publishes beside index/ so the index can be rebuilt
+    // from it byte for byte (index/metadata.json, rebuild).
+    path "keys/${shard.name}.gz", emit: gz
+    // shard_<accession>.tsv: a header and one row: file gz_md5 gz_size tsv_md5 tsv_size lines
+    path "shard_${shard.baseName}.tsv", emit: row
+
+    script:
+    // gzip -n leaves out the file name and time, so the same lines compress to the same bytes
+    // with the same gzip. The compressed copy is read back and checked against the shard's md5,
+    // so a shard that does not round-trip fails here rather than at a rebuild.
+    """
+    mkdir keys
+    gzip -nc ${shard} > keys/${shard.name}.gz.partial
+    tsv_md5=\$(openssl dgst -md5 -r ${shard} | awk '{ print \$1 }')
+    back_md5=\$(gzip -dc keys/${shard.name}.gz.partial | openssl dgst -md5 -r | awk '{ print \$1 }')
+    if [[ \$back_md5 != "\$tsv_md5" ]]; then
+        echo "SHARD: keys/${shard.name}.gz unpacks to md5 \$back_md5, not ${shard.name}'s \$tsv_md5" >&2
+        exit 1
+    fi
+    gz_md5=\$(openssl dgst -md5 -r keys/${shard.name}.gz.partial | awk '{ print \$1 }')
+    printf 'file\\tgz_md5\\tgz_size\\ttsv_md5\\ttsv_size\\tlines\\n' > shard_${shard.baseName}.tsv.partial
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' ${shard.name}.gz "\$gz_md5" "\$(wc -c < keys/${shard.name}.gz.partial | tr -d ' ')" \\
+        "\$tsv_md5" "\$(wc -c < ${shard} | tr -d ' ')" "\$(wc -l < ${shard} | tr -d ' ')" >> shard_${shard.baseName}.tsv.partial
+    mv keys/${shard.name}.gz.partial keys/${shard.name}.gz
+    mv shard_${shard.baseName}.tsv.partial shard_${shard.baseName}.tsv
+    """
+
+    stub:
+    """
+    mkdir keys
+    printf '' | gzip -nc > keys/${shard.name}.gz
+    printf 'file\\tgz_md5\\tgz_size\\ttsv_md5\\ttsv_size\\tlines\\n' > shard_${shard.baseName}.tsv
+    printf '%s\\t-\\t0\\td41d8cd98f00b204e9800998ecf8427e\\t0\\t0\\n' ${shard.name}.gz >> shard_${shard.baseName}.tsv
+    """
+}
+
 process BUILD_INDEX {
     label 'build'
 
@@ -393,6 +437,60 @@ process REACH {
     """
 }
 
+process DIGEST {
+    label 'small'
+
+    input:
+    path index, stageAs: 'index'             // caid.fst and manifest.json of BUILD_INDEX
+    tuple path(genome_bin, stageAs: 'genome/*'), path(genome_idx, stageAs: 'genome/*')
+    path fasta, stageAs: 'fasta/*'           // hg38.fa.gz of FETCH_FASTA; [] for a --genome given
+    path cache_dirs, stageAs: 'cache*'       // the --cache directories, numbered as SPLIT_CACHE has them; [] without --cache
+    val statuses                             // as FINALIZE gets them
+    path stats, stageAs: 'stats/*'           // keys_<chrom>.tsv of KEYS
+
+    output:
+    // digest.tsv, no header, for index/metadata.json:
+    //   tool  clingen_index_version  <clingen-index --version>
+    //   file  <role>  <name>  <size>  <md5>   role index, genome, fasta, or cache, cache1, cache2, ...
+    //   gate  <failed check>                  as FINALIZE's gate states it; none when every check passed
+    path 'digest.tsv', emit: digest
+
+    script:
+    // The version is asked of the binary in the task image, the one every other task ran. The
+    // cache files are those SPLIT_CACHE reads, found the same way.
+    """
+    export LC_ALL=C
+    ${gateScript(statuses, stats)}
+
+    # file ROLE PATH: one file row
+    row() { printf 'file\\t%s\\t%s\\t%s\\t%s\\n' "\$1" "\$(basename "\$2")" "\$(wc -c < "\$2" | tr -d ' ')" \\
+        "\$(openssl dgst -md5 -r "\$2" | awk '{ print \$1 }')"; }
+    {
+        printf 'tool\\tclingen_index_version\\t%s\\n' "\$(clingen-index --version)"
+        row index index/caid.fst
+        row index index/manifest.json
+        row genome ${genome_bin}
+        row genome ${genome_idx}
+        for f in ${fasta}; do row fasta "\$f"; done
+        for d in ${cache_dirs}; do
+            find -L "\$d" -maxdepth 1 -type f \\( -name '*.tsv' -o -name '*.tsv.gz' \\) | sort |
+                while IFS= read -r f; do row "\$d" "\$f"; done
+        done
+        awk '{ print "gate\\t" \$0 }' gate.txt
+    } > digest.tsv.partial
+    mv digest.tsv.partial digest.tsv
+    """
+
+    stub:
+    """
+    {
+        printf 'tool\\tclingen_index_version\\tclingen-index stub\\n'
+        printf 'file\\tindex\\tcaid.fst\\t0\\td41d8cd98f00b204e9800998ecf8427e\\n'
+        printf 'file\\tindex\\tmanifest.json\\t3\\t8a80554c91d9fca8acb82f023de02f11\\n'
+    } > digest.tsv
+    """
+}
+
 process FINALIZE {
     label 'small'
     // A failed gate is deliberate: another attempt would fail the same way.
@@ -400,19 +498,23 @@ process FINALIZE {
     publishDir "${params.outdir}", mode: 'copy'
 
     input:
-    path index
+    path index, stageAs: 'index/*'       // caid.fst and manifest.json of BUILD_INDEX
     path genome, stageAs: 'genome/*'     // the built genome, published beside the index; [] for a --genome given
+    path shards, stageAs: 'keys/*'       // keys/<accession>.tsv.gz of SHARD, the index's rebuild input
     val statuses                         // '<validate|reach>:<chrom>:<exit status>' for every check
-    path stats, stageAs: 'keys/*'        // keys_<chrom>.tsv: a chromosome with windows but no enumerated key fails
+    path stats, stageAs: 'stats/*'       // keys_<chrom>.tsv: a chromosome with windows but no enumerated key fails
     val allow_mismatches                 // publish despite failed checks
+    val metadata                         // index/metadata.json as text (modules/metadata.nf)
     // REPORT's summary.md, unread: taken so that FINALIZE runs after REPORT, and a run the gate
     // stops still leaves its reports.
     path report, stageAs: 'report/*'
 
     output:
-    // The staged inputs themselves, published once every check passed.
-    path 'index', includeInputs: true, emit: index
+    // The staged inputs themselves and the metadata written beside them, published together once
+    // every check passed: the index, the shards it was built from and the record of both.
+    path 'index/*', includeInputs: true, emit: index
     path 'genome/*', includeInputs: true, arity: '0..*', emit: genome
+    path 'keys/*.tsv.gz', includeInputs: true, arity: '1..*', emit: keys
 
     script:
     // A String 'false' (the command line's, or a params file's) is true in a condition.
@@ -427,20 +529,34 @@ process FINALIZE {
             sed 's/^/  /' gate.txt >&2
         else
             {
-                echo "FINALIZE: not publishing index/: \$(wc -l < gate.txt | tr -d ' ') check(s) failed:"
+                echo "FINALIZE: not publishing index/ or keys/: \$(wc -l < gate.txt | tr -d ' ') check(s) failed:"
                 sed 's/^/  /' gate.txt
                 echo 'reports/summary.md says more; --allow_mismatches publishes anyway.'
             } >&2
             exit 1
         fi
     fi
+    ${writeMetadata(metadata)}
     """
 
     stub:
+    // A stub run checks nothing, but writes the metadata as a real run does.
     """
-    # The outputs are the staged index and genome; a stub run checks nothing.
-    true
+    ${writeMetadata(metadata)}
     """
+}
+
+// Bash that writes index/metadata.json from its text, through a quoted here-document, in which
+// the shell expands nothing. index/ is the directory Nextflow staged the index files into.
+def writeMetadata(metadata) {
+    if (!(metadata instanceof CharSequence)) {
+        error("FINALIZE: metadata must be the JSON text of index/metadata.json, not ${metadata.getClass().simpleName}")
+    }
+    def end = 'END_OF_METADATA_JSON'
+    if (metadata.toString().readLines().contains(end)) {
+        error("FINALIZE: metadata holds the line ${end}, which would end its here-document early")
+    }
+    return "cat > index/metadata.json.partial <<'${end}'\n${metadata}\n${end}\nmv index/metadata.json.partial index/metadata.json"
 }
 
 process REPORT {

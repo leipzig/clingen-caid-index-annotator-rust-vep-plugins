@@ -1,12 +1,14 @@
 // Regenerates the ClinGen CA-ID index (caid.fst + manifest.json) for one chromosome or all:
 // every allele the Registry holds in the query windows, plus the registered answers for the
-// harvested datasets' sites, checked by validate and reach before FINALIZE publishes it.
+// harvested datasets' sites, checked by validate and reach before FINALIZE publishes it with
+// the key shards it was built from (keys/) and a record of how it was made (index/metadata.json).
 // `nextflow run pipeline --help` lists the parameters (nextflow_schema.json).
 
 include { validateParameters; paramsHelp; paramsSummaryLog } from 'plugin/nf-schema'
 include { RESOLVE_GNOMAD; GNOMAD_SITES; CLINVAR_SITES; FETCH_UCSC; FETCH_FASTA } from './modules/sources'
 include { REGIONS; ENUMERATE; LOOKUP } from './modules/registry'
-include { SPLIT_CACHE; MERGE_SITES; COLLECT; BUILD_GENOME; KEYS; BUILD_INDEX; VALIDATE; REACH; FINALIZE; REPORT } from './modules/index'
+include { SPLIT_CACHE; MERGE_SITES; COLLECT; BUILD_GENOME; KEYS; SHARD; BUILD_INDEX; VALIDATE; REACH; DIGEST; FINALIZE; REPORT } from './modules/index'
+include { metadataDocument; sourceRecord; gitRecord } from './modules/metadata'
 
 workflow {
     // Under the strict parser, command-line values are Strings: a bare --help is 'true' and
@@ -27,7 +29,7 @@ workflow {
         validateParameters()
         def run = settings()
         log.info paramsSummaryLog(afterText: "\nchromosomes : ${run.chroms.join(',')}\n")
-        REGENERATE(run)
+        REGENERATE(run, launchRecord())
     }
 }
 
@@ -37,6 +39,7 @@ workflow {
 workflow REGENERATE {
     take:
     run     // settings()
+    launch  // launchRecord(): what index/metadata.json records of the launcher
 
     main:
     def chroms = run.chroms
@@ -117,6 +120,7 @@ workflow REGENERATE {
     // The genome: the one given, or built from UCSC hg38 for the run's chromosomes.
     def genome = channel.empty()
     def genomeToPublish = channel.value([])
+    def fasta = channel.value([])
     if (run.genome) {
         genome = channel.value(run.genome)
     }
@@ -125,6 +129,7 @@ workflow REGENERATE {
         BUILD_GENOME(FETCH_FASTA.out.fasta, chroms)
         genome = BUILD_GENOME.out.genome
         genomeToPublish = BUILD_GENOME.out.genome
+        fasta = FETCH_FASTA.out.fasta
     }
 
     // The manifest's dates, from the UTC day each Registry task recorded: the registry source
@@ -191,14 +196,71 @@ workflow REGENERATE {
             ]
         }
     )
+
+    // What index/metadata.json records: the checksums DIGEST takes in the task image (index,
+    // genome, hg38.fa.gz, the --cache files, the tool's version) and the gate, then the document
+    // assembled here from them, the run's settings and the tasks' small outputs. Each part is
+    // wrapped in a one-key map, so combine (which flattens lists) keeps the lists whole.
+    SHARD(KEYS.out.shard)
+    DIGEST(BUILD_INDEX.out.index, genome, fasta, run.cache, statuses, KEYS.out.stats.toSortedList())
+    def metadata = BUILD_INDEX.out.index.map { d -> [index: d] }
+        .combine(DIGEST.out.digest.map { f -> [digest: f] })
+        .combine(SHARD.out.row.toSortedList().map { fs -> [shards: fs] })
+        .combine(KEYS.out.stats.toSortedList().map { fs -> [stats: fs] })
+        .combine(REPORT.out.sources.map { f -> [sources: f] })
+        .combine(REPORT.out.coverage.map { f -> [coverage: f] })
+        .combine(REGIONS.out.summary.map { f -> [regions: f] })
+        .combine(provenance.toSortedList().map { fs -> [provenance: fs] })
+        .combine(dates.map { d -> [dates: d] })
+        .combine(statuses.map { s -> [statuses: s] })
+        .map { maps -> metadataDocument(launch, run, maps.inject([:]) { a, b -> a + b }) }
+
+    // Publish the index, its shards and its metadata together, only if every check passed (or
+    // --allow_mismatches).
     FINALIZE(
-        BUILD_INDEX.out.index,
+        BUILD_INDEX.out.index.map { d -> [d.resolve('caid.fst'), d.resolve('manifest.json')] },
         genomeToPublish,
+        SHARD.out.gz.toSortedList(),
         statuses,
         KEYS.out.stats.toSortedList(),
         run.allow_mismatches,
+        metadata,
         REPORT.out.summary
     )
+}
+
+// What index/metadata.json records of the launcher and the run as launched: the pipeline's
+// commit and source digest (modules/metadata.nf), Nextflow's view of the run, and every
+// parameter as resolved. No parameter holds a credential; one that ever does must be left out
+// of params here by name.
+def launchRecord() {
+    def git = gitRecord(projectDir)
+    def source = sourceRecord(projectDir)
+    return [
+        pipeline: [
+            name: workflow.manifest.name,
+            version: workflow.manifest.version,
+            git_commit: git.commit,
+            git_dirty: git.dirty,
+            source_digest: source.digest,
+            source_files: source.files,
+            nextflow_version: workflow.nextflow.version.toString(),
+            command_line: workflow.commandLine,
+            config_files: workflow.configFiles.collect { f -> f.toString() },
+            profile: workflow.profile,
+            run_name: workflow.runName,
+            session_id: workflow.sessionId.toString(),
+            resume: workflow.resume,
+            stub_run: workflow.stubRun,
+            launch_dir: workflow.launchDir.toString(),
+            project_dir: workflow.projectDir.toString(),
+            work_dir: workflow.workDir.toUriString(),
+            start: workflow.start.toInstant().toString(),
+            container: workflow.container,
+            container_engine: workflow.containerEngine,
+        ],
+        params: params.keySet().toSorted().collectEntries { k -> [k, params[k]] },
+    ]
 }
 
 // Parameters as the workflow uses them, each converted once. nf-schema has checked them,
