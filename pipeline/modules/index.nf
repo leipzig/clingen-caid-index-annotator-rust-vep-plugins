@@ -451,13 +451,18 @@ process DIGEST {
     output:
     // digest.tsv, no header, for index/metadata.json:
     //   tool  clingen_index_version  <clingen-index --version>
+    //   tool  clingen_index_sha256   <sha256 of the clingen-index binary on PATH>
+    //   tool  clingen_index_path     <its path>
+    //   tool  platform               <uname -sm>: the sha256 holds for this platform only
     //   file  <role>  <name>  <size>  <md5>   role index, genome, fasta, or cache, cache1, cache2, ...
     //   gate  <failed check>                  as FINALIZE's gate states it; none when every check passed
     path 'digest.tsv', emit: digest
 
     script:
-    // The version is asked of the binary in the task image, the one every other task ran. The
-    // cache files are those SPLIT_CACHE reads, found the same way.
+    // The version and the binary's sha256 are taken in the task image, of the binary every other
+    // task ran: the version string is the crate's, which is not raised with each change to
+    // crates/, so only the sha256 tells one build from another. The cache files are those
+    // SPLIT_CACHE reads, found the same way.
     """
     export LC_ALL=C
     ${gateScript(statuses, stats)}
@@ -466,7 +471,11 @@ process DIGEST {
     row() { printf 'file\\t%s\\t%s\\t%s\\t%s\\n' "\$1" "\$(basename "\$2")" "\$(wc -c < "\$2" | tr -d ' ')" \\
         "\$(openssl dgst -md5 -r "\$2" | awk '{ print \$1 }')"; }
     {
+        bin=\$(command -v clingen-index)
         printf 'tool\\tclingen_index_version\\t%s\\n' "\$(clingen-index --version)"
+        printf 'tool\\tclingen_index_sha256\\t%s\\n' "\$(openssl dgst -sha256 -r "\$bin" | awk '{ print \$1 }')"
+        printf 'tool\\tclingen_index_path\\t%s\\n' "\$bin"
+        printf 'tool\\tplatform\\t%s\\n' "\$(uname -sm)"
         row index index/caid.fst
         row index index/manifest.json
         row genome ${genome_bin}
@@ -485,6 +494,9 @@ process DIGEST {
     """
     {
         printf 'tool\\tclingen_index_version\\tclingen-index stub\\n'
+        printf 'tool\\tclingen_index_sha256\\te3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\\n'
+        printf 'tool\\tclingen_index_path\\tclingen-index\\n'
+        printf 'tool\\tplatform\\tstub\\n'
         printf 'file\\tindex\\tcaid.fst\\t0\\td41d8cd98f00b204e9800998ecf8427e\\n'
         printf 'file\\tindex\\tmanifest.json\\t3\\t8a80554c91d9fca8acb82f023de02f11\\n'
     } > digest.tsv

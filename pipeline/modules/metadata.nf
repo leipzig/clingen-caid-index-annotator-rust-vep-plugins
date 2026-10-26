@@ -46,6 +46,31 @@ def sourceRecord(projectDir) {
     return [digest: hexDigest('SHA-256', manifest.getBytes('UTF-8')), files: files]
 }
 
+// The inputs the task image's clingen-index is built from, in the repository that holds
+// projectDir (its parent directory): the Dockerfile and what its build context admits, which
+// are Cargo.toml, Cargo.lock, rust-toolchain.toml and every file under crates/. The digest is
+// made as source_digest is, so it can be computed for any copy of the repository:
+//   find Cargo.toml Cargo.lock rust-toolchain.toml Dockerfile crates -type f | LC_ALL=C sort \
+//       | xargs sha256sum | sha256sum
+// These are the launcher's files, which describe the image only when it was built from them;
+// DIGEST's sha256 of the binary is what names the one that ran. null when that directory has no
+// Cargo.lock or crates/, as for a copy of pipeline/ alone.
+// Returns [root:, digest: hex, files: [[path:, sha256:], ...]] or null.
+def buildSourceRecord(projectDir) {
+    def root = file(projectDir.toString()).parent
+    if (root == null || !root.resolve('Cargo.lock').exists() || !root.resolve('crates').isDirectory()) {
+        return null
+    }
+    def names = ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'Dockerfile'].findAll { name -> root.resolve(name).exists() }
+    root.resolve('crates').eachFileRecurse(groovy.io.FileType.FILES) { f -> names << root.relativize(f).toString() }
+    // String order is byte order for these ASCII paths, as LC_ALL=C sort gives it.
+    def files = names.toSorted().collect { name ->
+        [path: name, sha256: hexDigest('SHA-256', root.resolve(name).bytes)]
+    }
+    def manifest = files.collect { f -> "${f.sha256}  ${f.path}\n" }.join('')
+    return [root: root.toString(), digest: hexDigest('SHA-256', manifest.getBytes('UTF-8')), files: files]
+}
+
 // The commit of the repository holding projectDir and whether its working tree differs from it
 // (git status, untracked files included, ignored ones not), both null when projectDir is not
 // in a git checkout or git cannot be run: an rsync'd copy has no .git, and source_digest
@@ -163,12 +188,16 @@ def rebuildRecord(Map manifest, List shardFiles, Map expected) {
             "path; validate and reach are what read it)."
     }
     return [
-        directory: 'A new, empty directory, the working directory of the command. It holds keys/, every shard of ' +
-            '<outdir>/keys/ gunzipped under its name without .gz' + (relative ? ', and genome/ as described under genome.' : '.'),
+        directory: 'A new, empty directory (rebuild/ in steps), the working directory of the command. It holds keys/, ' +
+            'every shard of <outdir>/keys/ gunzipped under its name without .gz' +
+            (relative ? ', and genome/ as described under genome.' : '.') +
+            ' <outdir> is the run\'s --outdir or a local copy of it; the first step makes it absolute before the ' +
+            'second changes directory, so a relative <outdir> is read from where the steps start.',
         steps: [
+            'out=$(cd <outdir> && pwd -P)',
             'mkdir rebuild && cd rebuild',
-            'mkdir keys && for f in <outdir>/keys/*.tsv.gz; do n=$(basename "$f" .gz); gzip -dc "$f" > "keys/$n"; done',
-        ] + (relative ? ['mkdir genome && ln -s <outdir>/genome/GRCh38.bin <outdir>/genome/GRCh38.bin.idx genome/'] : []) + [
+            'mkdir keys && for f in "$out"/keys/*.tsv.gz; do n=$(basename "$f" .gz); gzip -dc "$f" > "keys/$n"; done',
+        ] + (relative ? ['mkdir genome && ln -s "$out"/genome/GRCh38.bin "$out"/genome/GRCh38.bin.idx genome/'] : []) + [
             argv.collect { w -> shellQuote(w) }.join(' '),
             'md5sum index/caid.fst index/manifest.json   # or: md5 -r on macOS',
         ],
@@ -181,15 +210,15 @@ def rebuildRecord(Map manifest, List shardFiles, Map expected) {
             'same bytes whenever build records the same genome string (see genome). build refuses a --genome that ' +
             'does not exist; rebuilt with another genome path, only the manifest\'s genome line differs, and ' +
             'caid.fst is the same.',
-        tool_note: 'Use the clingen-index of tool.clingen_index_version (the task image\'s binary): another release ' +
-            'may lay out caid.fst differently. pipeline/tests/check_rebuild.sh <outdir> runs these steps and ' +
-            'compares the md5s.',
+        tool_note: 'Run the clingen-index whose sha256 is tool.clingen_index_sha256 (see tool.note for how to build ' +
+            'it); another build may lay out caid.fst differently, and the md5s are what decide. ' +
+            'pipeline/tests/check_rebuild.sh <outdir> runs these steps and compares the md5s.',
     ]
 }
 
 // The whole document, as pretty-printed JSON text.
-//   launch  [pipeline: map of the launcher's facts (main.nf's launchRecord), params: every
-//           resolved parameter]
+//   launch  [pipeline: map of the launcher's facts (main.nf's launchRecord), build_source:
+//           buildSourceRecord() or null, params: every resolved parameter]
 //   run     settings() of main.nf
 //   parts   [index: BUILD_INDEX's index directory, digest: DIGEST's digest.tsv, shards: SHARD's
 //           shard_<accession>.tsv rows, stats: KEYS' keys_<chrom>.tsv, sources and coverage:
@@ -277,8 +306,19 @@ def metadataDocument(Map launch, Map run, Map parts) {
         pipeline: launch.pipeline + [written: java.time.Instant.now().toString()],
         tool: [
             clingen_index_version: tool.clingen_index_version,
-            clingen_index_note: 'clingen-index --version, run by DIGEST in the task image the run used',
+            clingen_index_sha256: tool.clingen_index_sha256,
+            clingen_index_path: tool.clingen_index_path,
+            platform: tool.platform,
+            build_source: launch.build_source,
             vareffect_version: manifest.vareffect_version,
+            note: 'clingen_index_version, clingen_index_sha256, clingen_index_path and platform (uname -sm) are ' +
+                'taken by DIGEST inside the task image every other task ran in. The version is the crate\'s, which is not ' +
+                'raised with each change to crates/, so it does not name the binary; clingen_index_sha256 ' +
+                'does, for one platform. build_source digests the image\'s build inputs (Dockerfile, Cargo.toml, ' +
+                'Cargo.lock, rust-toolchain.toml, crates/) in the launcher\'s checkout, and describes the image only ' +
+                'if the image was built from that checkout. To get the binary again: check out pipeline.git_commit ' +
+                '(or a copy whose build_source.digest matches), docker build the image on the same platform, and ' +
+                'compare the sha256 of its /usr/local/bin/clingen-index with clingen_index_sha256.',
         ],
         params: launch.params,
         regions: [

@@ -8,7 +8,7 @@ include { validateParameters; paramsHelp; paramsSummaryLog } from 'plugin/nf-sch
 include { RESOLVE_GNOMAD; GNOMAD_SITES; CLINVAR_SITES; FETCH_UCSC; FETCH_FASTA } from './modules/sources'
 include { REGIONS; ENUMERATE; LOOKUP } from './modules/registry'
 include { SPLIT_CACHE; MERGE_SITES; COLLECT; BUILD_GENOME; KEYS; SHARD; BUILD_INDEX; VALIDATE; REACH; DIGEST; FINALIZE; REPORT } from './modules/index'
-include { metadataDocument; sourceRecord; gitRecord } from './modules/metadata'
+include { metadataDocument; sourceRecord; buildSourceRecord; gitRecord } from './modules/metadata'
 
 workflow {
     // Under the strict parser, command-line values are Strings: a bare --help is 'true' and
@@ -237,6 +237,7 @@ def launchRecord() {
     def git = gitRecord(projectDir)
     def source = sourceRecord(projectDir)
     return [
+        build_source: buildSourceRecord(projectDir),
         pipeline: [
             name: workflow.manifest.name,
             version: workflow.manifest.version,
