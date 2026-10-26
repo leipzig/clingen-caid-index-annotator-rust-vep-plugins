@@ -1,0 +1,60 @@
+// buildSourceRecord (modules/metadata.nf) on this repository: the digest metadata.json records as
+// tool.build_source.digest is what the shell command in modules/metadata.nf prints over the task
+// image's build inputs, so any copy of the repository can be matched to it; a copy of pipeline/
+// alone has none of those inputs and gives null.
+
+nextflow_function {
+
+    name    "buildSourceRecord"
+    script  "modules/metadata.nf"
+    function "buildSourceRecord"
+    tag     "metadata"
+
+    test("buildSourceRecord digests the image's build inputs, as find, sort and sha256sum give it") {
+        when {
+            function {
+                """
+                input[0] = '${projectDir}'
+                """
+            }
+        }
+        then {
+            assert function.success
+            def record = function.result
+            def root = new File(projectDir.toString()).parent
+            assert record.root == root
+            def names = record.files*.path
+            assert names.take(4) == ['Cargo.lock', 'Cargo.toml', 'Dockerfile', 'crates/clingen-allele/Cargo.toml']
+            assert names.contains('rust-toolchain.toml')
+            assert names.every { it in ['Cargo.lock', 'Cargo.toml', 'Dockerfile', 'rust-toolchain.toml'] || it.startsWith('crates/') }
+            record.files.each { f ->
+                assert f.sha256 == TestFiles.digest('SHA-256', new File("${root}/${f.path}").bytes)
+            }
+            def command = 'find Cargo.toml Cargo.lock rust-toolchain.toml Dockerfile crates -type f | LC_ALL=C sort | xargs sha256sum | sha256sum'
+            def proc = ['bash', '-c', "cd '${root}' && ${command}"].execute()
+            def out = proc.text
+            assert proc.waitFor() == 0
+            assert out.tokenize(' ')[0] == record.digest
+        }
+    }
+
+    // A copy of pipeline/ alone, in the system's temporary directory: its parent holds no Cargo.lock.
+    test("buildSourceRecord of a copy of pipeline/ alone") {
+        def copy
+        when {
+            copy = java.nio.file.Files.createTempDirectory('pipeline-copy').toFile()
+            function {
+                """
+                input[0] = '${copy}'
+                """
+            }
+        }
+        then {
+            assert function.success
+            assert function.result == null
+        }
+        cleanup {
+            copy?.delete()
+        }
+    }
+}

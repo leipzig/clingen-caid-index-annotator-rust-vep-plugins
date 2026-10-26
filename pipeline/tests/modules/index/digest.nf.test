@@ -1,7 +1,7 @@
 // DIGEST on stand-in files made in the test: an index, a genome, hg38.fa.gz and two --cache
 // directories, with the checks' statuses and KEYS stats the gate reads. Its digest.tsv carries
-// the md5 and size of each, the version of clingen-index (from PATH here, the task image's in a
-// real run) and the failed checks, for index/metadata.json.
+// the md5 and size of each, the version, sha256 and path of clingen-index (from PATH here, the
+// task image's in a real run), the platform and the failed checks, for index/metadata.json.
 
 nextflow_process {
 
@@ -68,8 +68,12 @@ nextflow_process {
             def f = staged.files
             def version = 'clingen-index --version'.execute().text.trim()
             assert version ==~ /clingen-index \d+\.\d+\.\d+.*/
+            def bin = ['bash', '-c', 'command -v clingen-index'].execute().text.trim()
             assert lines == [
                 "tool\tclingen_index_version\t${version}".toString(),
+                "tool\tclingen_index_sha256\t${TestFiles.digest('SHA-256', new File(bin).bytes)}".toString(),
+                "tool\tclingen_index_path\t${bin}".toString(),
+                "tool\tplatform\t${['uname', '-sm'].execute().text.trim()}".toString(),
                 row('index', "${f.index}/caid.fst"),
                 row('index', "${f.index}/manifest.json"),
                 row('genome', f.bin),
@@ -129,7 +133,9 @@ nextflow_process {
         }
         then {
             assert process.success
-            assert path(process.out.digest[0]).readLines()[0].startsWith('tool\tclingen_index_version\t')
+            def lines = path(process.out.digest[0]).readLines()
+            assert lines[0].startsWith('tool\tclingen_index_version\t')
+            assert lines[1] ==~ /tool\tclingen_index_sha256\t[0-9a-f]{64}/
         }
     }
 }

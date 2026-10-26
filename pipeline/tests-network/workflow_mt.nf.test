@@ -92,6 +92,10 @@ nextflow_pipeline {
             assert meta.checks.gate.passed == true
             assert meta.checks.per_chromosome.MT['index:keys'] == manifest.entries
             assert meta.rebuild.argv[-3..-1] == ['--genome', 'genome/GRCh38.bin', '--genome-relative']
+            // the binary DIGEST ran, PATH's under nf-test's host profile, named by its sha256
+            def bin = ['bash', '-c', 'command -v clingen-index'].execute().text.trim()
+            assert meta.tool.clingen_index_sha256 == TestFiles.digest('SHA-256', new File(bin).bytes)
+            assert meta.tool.build_source.digest ==~ /[0-9a-f]{64}/
 
             // The index rebuilt from keys/ in another directory, byte for byte.
             def proc = ['bash', "${projectDir}/tests/check_rebuild.sh", results].execute()
@@ -99,6 +103,8 @@ nextflow_pipeline {
             def err = new StringBuilder()
             proc.waitForProcessOutput(out, err)
             assert proc.exitValue() == 0 : err.toString()
+            assert err.toString().contains('checked caid.fst byte for byte; manifest.json byte for byte')
+            assert err.toString().contains('clingen-index is the binary that built the index')
         }
     }
 }

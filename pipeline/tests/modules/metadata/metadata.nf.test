@@ -22,6 +22,9 @@ nextflow_function {
         new File(index, 'manifest.json').text = manifest
         def digest = [
             'tool\tclingen_index_version\tclingen-index 0.1.0',
+            'tool\tclingen_index_sha256\tb2acd6afd421b0dbc73642e031d354e876501ddd183cd29868b895a2ccef2f2b',
+            'tool\tclingen_index_path\t/usr/local/bin/clingen-index',
+            'tool\tplatform\tLinux aarch64',
             'file\tindex\tcaid.fst\t624\t0123456789abcdef0123456789abcdef',
             'file\tindex\tmanifest.json\t300\tfedcba9876543210fedcba9876543210',
             'file\tgenome\tGRCh38.bin\t16700\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -76,6 +79,7 @@ nextflow_function {
                        run_name: 'test_run', session_id: 'session', launch_dir: '/launch', project_dir: '/launch/pipeline',
                        work_dir: '/launch/work', start: '2026-10-24T22:31:28Z', container: 'clingen-index:0.1.0',
                        container_engine: 'docker'],
+            build_source: [root: '/launch', digest: 'def', files: [[path: 'Cargo.lock', sha256: 'fed']]],
             params: [chrom: 'MT', registry_url: 'https://reg.genome.network', ucsc_base: 'https://hgdownload.soe.ucsc.edu/goldenPath/hg38',
                      gnomad_version: 'latest', gnomad_mirror: 'gcs', clinvar_vcf: 'clinvar_mini.vcf.gz'],
         ]
@@ -138,6 +142,12 @@ nextflow_function {
             }
             assert m.pipeline.written ==~ /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/
             assert m.tool.clingen_index_version == 'clingen-index 0.1.0'
+            assert m.tool.clingen_index_sha256 == 'b2acd6afd421b0dbc73642e031d354e876501ddd183cd29868b895a2ccef2f2b'
+            assert m.tool.clingen_index_path == '/usr/local/bin/clingen-index'
+            assert m.tool.platform == 'Linux aarch64'
+            assert m.tool.build_source == [root: '/launch', digest: 'def', files: [[path: 'Cargo.lock', sha256: 'fed']]]
+            assert m.tool.note.contains('clingen_index_sha256')
+            assert m.rebuild.tool_note.contains('tool.clingen_index_sha256')
             assert m.tool.vareffect_version == '0.6.0'
             assert m.params.chrom == 'MT'
 
@@ -198,7 +208,10 @@ nextflow_function {
                 '--source', 'gnomad_genomes_v3.1', '--harvest-date', '2026-10-24', '--genome', 'genome/GRCh38.bin', '--genome-relative']
             assert m.rebuild.command == m.rebuild.argv.join(' ')
             assert m.rebuild.genome.relative == true
-            assert m.rebuild.steps.any { it.contains('ln -s <outdir>/genome/GRCh38.bin <outdir>/genome/GRCh38.bin.idx genome/') }
+            // <outdir> made absolute before the steps change directory, so a relative one works too
+            assert m.rebuild.steps[0..1] == ['out=$(cd <outdir> && pwd -P)', 'mkdir rebuild && cd rebuild']
+            assert m.rebuild.steps.findAll { it.contains('<outdir>') } == ['out=$(cd <outdir> && pwd -P)']
+            assert m.rebuild.steps.contains('mkdir genome && ln -s "$out"/genome/GRCh38.bin "$out"/genome/GRCh38.bin.idx genome/')
             assert m.rebuild.expected_md5 == ['caid.fst': '0123456789abcdef0123456789abcdef', 'manifest.json': 'fedcba9876543210fedcba9876543210']
             assert m.rebuild.manifest_identical == true
             assert m.regenerate.command_line == 'nextflow run pipeline --chrom MT'

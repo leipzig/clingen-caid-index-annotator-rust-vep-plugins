@@ -44,8 +44,10 @@ nextflow_pipeline {
 
     // tests/check_rebuild.sh on a run's outdir: [exit status, its stderr]. It rebuilds the index from
     // keys/ in a temporary directory with clingen-index from PATH (as the host profile has it).
-    def checkRebuild = { String projectDir, String results ->
-        def proc = ['bash', "${projectDir}/tests/check_rebuild.sh", results].execute()
+    // env: variables added to the test's environment, such as GENOME_STANDIN.
+    def checkRebuild = { String projectDir, String results, Map env = [:] ->
+        def vars = (System.getenv() + env).collect { k, v -> "${k}=${v}".toString() }
+        def proc = ['bash', "${projectDir}/tests/check_rebuild.sh", results].execute(vars, null)
         def out = new StringBuilder()
         def err = new StringBuilder()
         proc.waitForProcessOutput(out, err)
@@ -126,6 +128,14 @@ nextflow_pipeline {
             ['run_name', 'session_id', 'launch_dir', 'work_dir', 'start', 'written'].each { assert meta.pipeline[it] }
             assert meta.pipeline.containsKey('container') && meta.pipeline.container_engine == null
             assert meta.tool.clingen_index_version == 'clingen-index --version'.execute().text.trim()
+            // the binary DIGEST ran (PATH's, under the host profile), and the image's build inputs here
+            def bin = ['bash', '-c', 'command -v clingen-index'].execute().text.trim()
+            assert meta.tool.clingen_index_path == bin
+            assert meta.tool.clingen_index_sha256 == TestFiles.digest('SHA-256', new File(bin).bytes)
+            assert meta.tool.platform == ['uname', '-sm'].execute().text.trim()
+            assert meta.tool.build_source.root == new File(projectDir.toString()).parent
+            assert meta.tool.build_source.digest ==~ /[0-9a-f]{64}/
+            assert meta.tool.build_source.files*.path.containsAll(['Cargo.lock', 'Dockerfile', 'crates/clingen-index/Cargo.toml'])
             assert meta.tool.vareffect_version == manifest.vareffect_version
             assert meta.params.chrom == 'MT'
             assert meta.params.registry_url == registry.url
@@ -175,6 +185,47 @@ nextflow_pipeline {
             def (status, err) = checkRebuild(projectDir.toString(), results)
             assert status == 0 : err
             assert err.contains('rebuilt from keys/ byte for byte (1 shard(s))')
+            assert err.contains('checked caid.fst byte for byte; manifest.json byte for byte')
+            assert err.contains('clingen-index is the binary that built the index')
+
+            // rebuild.steps followed literally, from a directory beside results/, with <outdir> relative.
+            def steps = new File("${outputDir}/steps")
+            steps.mkdirs()
+            def script = (['set -eu'] + meta.rebuild.steps.collect { it.replace('<outdir>', '../results') }).join('\n')
+            def proc = ['bash', '-c', script].execute(null, steps)
+            def stepsErr = new StringBuilder()
+            proc.waitForProcessOutput(new StringBuilder(), stepsErr)
+            assert proc.exitValue() == 0 : stepsErr.toString()
+            ['caid.fst', 'manifest.json'].each { f ->
+                assert TestFiles.md5("${steps}/rebuild/index/${f}") == TestFiles.md5("${results}/index/${f}")
+            }
+
+            // A copy as if made with --genome at a path that does not exist on this machine:
+            // check_rebuild.sh stops, and with GENOME_STANDIN rebuilds with that file in its place,
+            // checking caid.fst byte for byte and manifest.json apart from its genome value.
+            def given = "${outputDir}/given"
+            new File("${given}/index").mkdirs()
+            new File("${given}/keys").mkdirs()
+            java.nio.file.Files.copy(new File(shard).toPath(), new File("${given}/keys/NC_012920.1.tsv.gz").toPath())
+            java.nio.file.Files.copy(new File("${results}/index/caid.fst").toPath(), new File("${given}/index/caid.fst").toPath())
+            def absent = '/no-such-dir/GRCh38.bin'
+            def givenManifest = new File("${results}/index/manifest.json").text.replace('"genome": "../genome/GRCh38.bin"', "\"genome\": \"${absent}\"")
+            assert givenManifest.contains(absent)
+            new File("${given}/index/manifest.json").text = givenManifest
+            def givenMeta = new groovy.json.JsonSlurper().parse(new File("${results}/index/metadata.json"))
+            givenMeta.rebuild.argv = givenMeta.rebuild.argv.findAll { it != '--genome-relative' }.collect { it == 'genome/GRCh38.bin' ? absent : it }
+            givenMeta.rebuild.genome = [recorded: absent, relative: false]
+            givenMeta.rebuild.expected_md5['manifest.json'] = TestFiles.md5("${given}/index/manifest.json")
+            new File("${given}/index/metadata.json").text = groovy.json.JsonOutput.toJson(givenMeta)
+            def (stopped, stopErr) = checkRebuild(projectDir.toString(), given)
+            assert stopped == 2 : stopErr
+            assert stopErr.contains("records the genome ${absent}, which does not exist here")
+            assert stopErr.contains('GENOME_STANDIN')
+            def standin = TestFiles.write("${outputDir}/standin/GRCh38.bin", ['not read'])
+            def (standinStatus, standinErr) = checkRebuild(projectDir.toString(), given, [GENOME_STANDIN: standin])
+            assert standinStatus == 0 : standinErr
+            assert standinErr.contains('rebuilt from keys/ with a stand-in genome (1 shard(s))')
+            assert standinErr.contains('checked caid.fst byte for byte; manifest.json byte for byte apart from its genome value')
         }
         cleanup {
             registry?.close()
