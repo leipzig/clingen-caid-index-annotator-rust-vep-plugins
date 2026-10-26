@@ -2,7 +2,8 @@
 // UCSC mini tables (one window, chrM 3009-5731, around MT-ND1 and MT-ND2), ClinVar from
 // tests/data/clinvar_mini.vcf.gz (7 MT sites), and the genome built from chrM.fa.gz, both read
 // from a UCSC mirror laid out under the test's output directory. It makes one region request and
-// one lookup, both read-only.
+// one lookup, both read-only. It also checks index/metadata.json and keys/ on that run, and
+// rebuilds the index from keys/ with tests/check_rebuild.sh.
 //
 // Outside tests/ on purpose (Ruling R10): nf-test 0.9.5 cannot leave out a tag, and a plain
 // `nf-test test` must stay offline. Run it explicitly, from pipeline/:
@@ -68,6 +69,36 @@ nextflow_pipeline {
             assert manifest.harvest_date == today.toString()
             assert manifest.genome == '../genome/GRCh38.bin'
             assert path("${results}/reports/validate_MT.txt").readLines().contains('m\t7\t7\t100.0')
+
+            // The shard the index was built from, and index/metadata.json, on a real Registry run.
+            def shard = "${results}/keys/NC_012920.1.tsv.gz"
+            assert new File("${results}/keys").list().toList() == ['NC_012920.1.tsv.gz']
+            assert TestFiles.lines(shard).size() == manifest.entries
+            def meta = new groovy.json.JsonSlurper().parse(new File("${results}/index/metadata.json"))
+            assert meta.format_version == 1
+            assert meta.registry.base_url == 'https://reg.genome.network'
+            assert meta.registry.registry_date == today.toString()
+            assert meta.regions.set == 'genes'
+            assert meta.regions.windows == 1
+            assert meta.sources.downloads*.source == ['ucsc_ncbiRefSeq', 'ucsc_knownGene', 'clinvar']
+            assert meta.sources.genome.built == true
+            assert meta.outputs.entries == manifest.entries
+            assert meta.outputs.index['caid.fst'].md5 == TestFiles.md5("${results}/index/caid.fst")
+            assert meta.outputs.keys == [[
+                file: 'NC_012920.1.tsv.gz', md5: TestFiles.md5(shard), size: new File(shard).length(),
+                tsv_md5: TestFiles.gunzippedMd5(shard), tsv_size: TestFiles.lines(shard).sum { it.length() + 1 },
+                lines: manifest.entries,
+            ]]
+            assert meta.checks.gate.passed == true
+            assert meta.checks.per_chromosome.MT['index:keys'] == manifest.entries
+            assert meta.rebuild.argv[-3..-1] == ['--genome', 'genome/GRCh38.bin', '--genome-relative']
+
+            // The index rebuilt from keys/ in another directory, byte for byte.
+            def proc = ['bash', "${projectDir}/tests/check_rebuild.sh", results].execute()
+            def out = new StringBuilder()
+            def err = new StringBuilder()
+            proc.waitForProcessOutput(out, err)
+            assert proc.exitValue() == 0 : err.toString()
         }
     }
 }
