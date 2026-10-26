@@ -299,17 +299,31 @@ nextflow run pipeline -profile awsbatch --chrom MT --regions genes \
 
 The first jobs take a few minutes to start while Batch brings up an instance.
 Then the full run: the protein-coding exons of every chromosome, with ClinVar.
+It reuses the ClinVar lookups saved on 2026-10-24 (`data/clinvar/20261019/chunks`
+in the checkout, 19 chunk files, 366 MB) as `--cache`, so only the sites they
+did not answer go to the Registry again. Upload them to the stack's bucket once,
+from the checkout, then launch:
 
 ```bash
-nextflow run pipeline -profile awsbatch --chrom all --regions pc_exons \
+aws s3 sync data/clinvar/20261019/chunks/ "s3://$BUCKET/cache/clinvar-20261019/"
+
+nextflow run pipeline -profile awsbatch --chrom all --regions pc_exons --datasets clinvar \
+  --cache "s3://$BUCKET/cache/clinvar-20261019" \
   --aws_queue "$QUEUE" --container "$REPO:0.1.0" \
   -work-dir "s3://$BUCKET/work" --outdir "s3://$BUCKET/results/pc_exons" -resume
 ```
 
+The instance role can read the bucket, so the tasks that read the cache
+(`SPLIT_CACHE`, and `DIGEST`, which records each file's md5 in
+`index/metadata.json`) get it staged like any other input. An `s3://` `--cache`
+has not been tested; if the run refuses it, copy the chunks to the launcher's
+disk and give that path instead (the launcher then uploads them to the work
+directory itself).
+
 - `-work-dir` must be in S3 and must name a sub-path (`.../work`), not the
   bucket root. The instance role can reach only this stack's bucket, so the work
   directory has to be in it.
-- `--chrom all` with `--regions pc_exons` is about 60,328 Registry requests. The
+- `--chrom all` with `--regions pc_exons` is at least 60,328 region requests. The
   Registry steps (`ENUMERATE` and `LOOKUP`) run one task at a time each, by
   design (the two can overlap), so the run takes roughly **31 hours** on the
   one `ENUMERATE` stream whatever `MaxvCpus` is. The launcher must stay up
@@ -364,7 +378,11 @@ cost estimate below does not cover it.
 
 When the run ends, `s3://$BUCKET/results/pc_exons/` holds:
 
-- `index/`: `caid.fst` and `manifest.json`, the index itself;
+- `index/`: `caid.fst` and `manifest.json`, the index itself (about 4.8 GB of
+  `caid.fst`, scaled from chr21), and `metadata.json`, which records how it was
+  made and the command that rebuilds it;
+- `keys/<accession>.tsv.gz`: the 25 sorted key shards the index was built from,
+  about 3.1 GB (an estimate scaled from chr21's 34.5 MB by window length);
 - `genome/`: the genome the index was built against;
 - `harvest/<chrom>.tsv.gz`: the Registry's answers for every site, by chromosome; pass the directory
   to a later run as `--cache` to skip the Registry for sites already answered
@@ -375,8 +393,8 @@ When the run ends, `s3://$BUCKET/results/pc_exons/` holds:
   `validate_<chrom>.txt` and `reach_<chrom>.txt` back them up;
 - `pipeline_info/`: Nextflow's trace, timeline and report.
 
-`index/` is published only if every check passed (or you gave
-`--allow_mismatches`). `FINALIZE`, the step that publishes it, waits for the
+`index/` and `keys/` are published only if every check passed (or you gave
+`--allow_mismatches`), together or not at all. `FINALIZE`, the step that publishes it, waits for the
 report, so `reports/` is there even when the gate stops the run; a failure of
 the report step itself also blocks publishing.
 
@@ -385,7 +403,23 @@ Fetch it:
 ```bash
 aws s3 sync "s3://$BUCKET/results/pc_exons" pc_exons
 less pc_exons/reports/summary.md
+bash pipeline/tests/check_rebuild.sh pc_exons
 ```
+
+`check_rebuild.sh` gunzips `keys/` into a temporary directory (about 24 GB with
+the new index; set `TMPDIR` to a disk with room), runs the `rebuild` command of
+`index/metadata.json` and compares the new `caid.fst` and `manifest.json` with
+the expected md5s and the published files, naming any difference. It needs `jq`
+and `clingen-index` on `PATH` (`cargo build --release -p clingen-index` in the
+checkout). A rerun of the pipeline would not reproduce the index, as the
+Registry keeps gaining alleles; README.md, Reproducing an index, explains.
+
+What was checked offline (2026-10-26), since no AWS account was used: these
+parameters, resolved with `nextflow config` through `conf/awsbatch.config`, give
+the `awsbatch` executor, the queue, the ECR image and `us-east-1`; and the same
+parameters with a local cache ran as a stub on the `slurm` profile through the
+shims of `pipeline/tests/run_slurm_shim.sh`, publishing `index/` with
+`metadata.json` and 25 shards in `keys/`.
 
 ### Resuming and the work expiry
 

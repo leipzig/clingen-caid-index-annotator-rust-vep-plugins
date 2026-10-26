@@ -488,7 +488,10 @@ or AWS Batch. It:
 4. checks it before publishing: `validate` recomputes every harvested row's
    HGVS from the genome, and `reach` turns every index key back into a VCF
    record, looks it up as the tools do and requires the key's own CA ID.
-   `index/` is published only if both pass.
+   `index/` is published only if both pass, together with `keys/`, the
+   sorted key shards it was built from, and `index/metadata.json`, which
+   records how it was made and the command that rebuilds it from `keys/`
+   byte for byte ([Reproducing an index](#reproducing-an-index)).
 
 Every task runs one `clingen-index` subcommand or a short shell pipeline, in
 one container image; there is no Python in the pipeline. Design:
@@ -605,14 +608,19 @@ with details and `--showHidden` with the hidden ones too, such as
 
 **Outputs** in `--outdir`:
 
-- `index/`: `caid.fst` and `manifest.json`, published only if every check
-  passed. The manifest's sources name the region set and the day the
+- `index/`: `caid.fst`, `manifest.json` and `metadata.json`, published only
+  if every check passed. `metadata.json` records how the index was made and
+  how to rebuild it ([Reproducing an index](#reproducing-an-index)). The
+  manifest's sources name the region set and the day the
   Registry was asked (`registry_pc_exons_<date>`, the UTC day of the earliest
   `ENUMERATE` task) and each dataset's release (`clinvar_<date>`,
   `gnomad_genomes_v<version>`); its `harvest_date` is the UTC day of the
   earliest `ENUMERATE` or `LOOKUP` task. A task that `-resume` reuses keeps
   the day it ran, so a resumed run's manifest is dated by the answers it
   holds;
+- `keys/<accession>.tsv.gz`: one per chromosome, the byte-sorted
+  `HGVS<TAB>CAID` pairs `build --sorted` read, compressed with `gzip -n`;
+  published with `index/` or not at all;
 - `genome/`: `GRCh38.bin` and its `.idx`, when the pipeline built them. The
   manifest then records the genome as `../genome/GRCh38.bin`, so keep the two
   directories side by side; a `--genome` you gave is recorded by its path and
@@ -627,8 +635,94 @@ with details and `--showHidden` with the hidden ones too, such as
   `reach_<chrom>.txt`;
 - `pipeline_info/`: Nextflow's `trace.txt`, `timeline.html` and `report.html`.
 
-`FINALIZE`, which publishes `index/`, waits for `REPORT`, so the reports are
-there even when the gate stops a run.
+`FINALIZE`, which publishes `index/`, `keys/` and `genome/`, waits for
+`REPORT`, so the reports are there even when the gate stops a run.
+
+### Reproducing an index
+
+Rerunning the pipeline regenerates an index; it does not reproduce one. The
+Registry gains alleles over time and cannot be asked what it held on an
+earlier day, and `latest` ClinVar, gnomAD and UCSC files change, so the same
+command next month gives a different index. What reproduces an index is a
+rebuild from the shards it was built from, which every published run keeps
+beside it:
+
+- `keys/<accession>.tsv.gz`: each chromosome's `KEYS` output, the exact input
+  of `clingen-index build --sorted`, compressed with `gzip -n` (no file name
+  or time in the header, so the same lines give the same bytes with the same
+  `gzip`; another `gzip` may give other bytes for the same lines, which is why
+  the md5 of the unpacked file is recorded too).
+- `index/metadata.json` (`"format_version": 1`), written by `FINALIZE` after
+  the gate and published with `index/` and `keys/`, or not at all:
+  - `pipeline`: the commit of the checkout holding `pipeline/` and whether
+    its working tree was dirty (both `null` for a copy without `.git`), a
+    `source_digest` that identifies the pipeline's files without `.git`,
+    Nextflow's version, the command line and config files, profile, run
+    name, session, launch, project and work directories, start time, the
+    time the document was written, and the container and engine as
+    configured;
+  - `tool`: `clingen-index --version`, asked by the `DIGEST` task inside the
+    task image, and the manifest's vareffect version;
+  - `params`: every parameter as resolved;
+  - `regions`: the region set (or the BED file's name and md5), pad, merge
+    gap, max window, flank, chromosomes, and windows, core and query bp from
+    `REGIONS`' summary, per chromosome and in total;
+  - `registry`: the base URL, the registry and harvest dates as the manifest
+    has them, page size, split overlap, `include_reference`;
+  - `sources`: every row of `reports/sources.tsv`, the ClinVar release, the
+    gnomAD files with their md5s, and the genome: for a built one the
+    `hg38.fa.gz` URL and md5 and the md5 and size of `GRCh38.bin` and its
+    `.idx`, for a `--genome` given its path and the same md5s;
+  - `cache`: each `--cache` directory with every file `SPLIT_CACHE` reads
+    (name, size, md5) and one digest over them all, which counts names and
+    md5s only, so a copy of the directory elsewhere gives the same digest.
+    Answers taken from a cache were fetched before the run; the manifest's
+    `harvest_date` covers only the answers the run fetched;
+  - `outputs`: md5 and size of `caid.fst` and `manifest.json`, the entry
+    count, and for each shard its md5 packed and unpacked, size and line
+    count;
+  - `checks`: the gate's result (a run published with `--allow_mismatches`
+    says which checks failed), every check's status and each chromosome's
+    counts from `coverage.tsv` and the `KEYS` stats;
+  - `rebuild`: the `build` command that gives `caid.fst` and `manifest.json`
+    again from the gunzipped shards, as an `argv` array and a shell string,
+    with the steps around it and the expected md5 of both files;
+  - `regenerate`: the command line, and the note that running it again
+    regenerates.
+
+`source_digest` is the sha256 of what `sha256sum` prints for the pipeline's
+files, which can be computed for any copy of `pipeline/`:
+
+```bash
+cd pipeline && sha256sum main.nf modules/*.nf nextflow.config conf/*.config nextflow_schema.json \
+  | LC_ALL=C sort -k2 | sha256sum
+```
+
+**The rebuild.** `manifest.json` records the sources in the order given, the
+harvest date and the genome, and holds no time or host, so the rebuild's
+command repeats `BUILD_INDEX`'s: the same `--source` labels in the same
+order, the same `--harvest-date`, and the same genome argument. A built
+genome is recorded as `../genome/GRCh38.bin`, relative to `index/`; `build`
+resolves the genome's directory before it makes the path relative, so the
+rebuild directory needs a real `genome/` directory beside `index/` holding
+the two files or links to them (a `genome/` that is itself a link would be
+recorded by its target's path). A `--genome` given is recorded by its
+absolute path, which must exist when the rebuild runs: `build` refuses a
+missing one, though it does not read it, so any file there gives the same
+bytes. With the genome recorded the same way, `manifest.json` comes back
+byte-identical too; with another genome path only its `genome` line
+differs, and `caid.fst` is the same. Use the `clingen-index` release that
+`tool.clingen_index_version` names.
+
+`pipeline/tests/check_rebuild.sh <outdir>` does all of it: in a new
+temporary directory it gunzips `keys/` and checks each shard's md5s and line
+count against `metadata.json`, links a built genome into `genome/`, runs the
+`rebuild` command, and compares the md5 of the new `caid.fst` and
+`manifest.json` with `metadata.json`'s expected ones and with
+`<outdir>/index/`. It names every difference and exits 1 if there is one. It
+needs `jq`, and takes `clingen-index` from `PATH` (set `CLINGEN_INDEX` to
+another command, such as `apptainer exec clingen-index.sif clingen-index`).
+For an `s3://` outdir, copy `index/`, `keys/` and `genome/` down first.
 
 ### The chr21 run (2026-10-24)
 
@@ -814,6 +908,47 @@ which a `-resume` keeps for the tasks it reuses. These ran from 22:31 MDT on
 2026-10-24, already 2026-10-25 in UTC, so the same runs would now record
 `registry_pc_exons_2026-10-25` and a `harvest_date` of 2026-10-25.
 
+**Metadata and rebuild (2026-10-26).** The pipeline has since gained
+`keys/` and `index/metadata.json` ([Reproducing an index](#reproducing-an-index)).
+A `-resume` of this run (session `1f25d9d8`) cannot reuse its Registry
+tasks: `ENUMERATE` and `LOOKUP` have changed since (each records the UTC day
+it ran, from `47cd3b7`), so their cached tasks no longer match and Nextflow
+would ask the Registry again. To check the new outputs on real data without a
+Registry request, the first example above was resumed with `-resume
+1f25d9d8-644f-488d-8c73-a86f8bec05e6 --outdir results/chr21-meta` and
+`--registry_url` pointing at a stand-in on the launcher (an ad-hoc Python
+server, not in the repository) that replays this run's own answers: the
+5,212,039 distinct pairs of its two `enum_21_*.tsv` work files, each returned
+for every window its span overlaps, and its 21 `LOOKUP` rows. Five tasks
+were cached (`SPLIT_CACHE`, `FETCH_UCSC`, `CLINVAR_SITES`, `REGIONS`,
+`MERGE_SITES`) and twelve ran, in 2 min 19 s:
+
+```
+[SUCCESS] completed=12 failed=0 cached=5
+```
+
+The stand-in answered 669 region requests and one lookup. The index came
+back the same: `caid.fst` md5 `fee1e8364418752fb8f8fc2f2f1384ed`, 5,212,187
+keys, every check passed. `manifest.json` differs only in its dates
+(`registry_pc_exons_2026-10-26` and a `harvest_date` of 2026-10-26, the UTC
+day the replayed tasks ran), and `registry:alleles` counts 5,215,954 pairs
+written rather than 5,215,913: the stand-in returns 41 more alleles from two
+adjacent windows each, and `KEYS` removes the second copies. A first try,
+whose stand-in returned an allele only to the windows its start lies in,
+gave 1,065 keys fewer: the live Registry also returned alleles that start
+before a window and end inside it (`NC_000021.9:g.10511963_10521699del`,
+from the window starting at 10,521,332).
+
+`results/chr21-meta/index/metadata.json` is 27,350 bytes, and
+`keys/NC_000021.9.tsv.gz` 34,530,254 bytes (209,452,251 unpacked, 5,212,187
+lines). `bash pipeline/tests/check_rebuild.sh results/chr21-meta`, with
+`clingen-index` built on the Mac from the same commit, rebuilt `caid.fst`
+and `manifest.json` byte for byte, twice, in 2.4 s each: the image's Linux
+build and the Mac build write the same bytes. The image's `gzip -n` (Debian)
+compressed the unpacked shard to the same bytes twice (md5
+`3ee066a65af1945eb95383435183cd71`) and Apple's `gzip` 487.0.1 to other
+bytes, which is why `metadata.json` records the unpacked md5 as well.
+
 **End to end.** The 51,738 chr21 records of the ClinVar 2026-10-19 VCF,
 annotated offline by both tools with this index (vep-rs `b03dd5f`, fastVEP
 `cb0a33c`, both rebuilt against this checkout), then checked against the
@@ -976,14 +1111,73 @@ estimates about 31 hours from the cost per request; at chr21's measured
 1.18 s per request it would be nearer 20 hours, though chr21 need not be
 typical. Scaled from chr21 by window length, the index would hold about
 460 million keys in a `caid.fst` of about 4.8 GB (the spec estimated
-550 million and 6.5 GB). Run it with the SLURM or AWS Batch example above;
-without `--genome` it builds the genome. A local run (`-profile local
---chrom all`) is untested and needs more memory and disk than chr21: raise
-the local caps with `-c` ([Local resources](#regenerating-the-index-nextflow)),
-give Docker (or the Colima VM) the memory, and expect the work directory to
-hold tens of GB. `-resume` continues a stopped run by re-running only the
-tasks that did not finish, and the launcher has to stay up for the whole
-run.
+550 million and 6.5 GB). `keys/` would be about 3.1 GB, an estimate scaled
+the same way (by 406.7 Mb of windows against chr21's 4.57 Mb, 88.9 times)
+from chr21's measured shard of 34,530,254 bytes
+([Metadata and rebuild](#the-chr21-run-2026-10-24)); unpacked for a rebuild
+it would be about 18.6 GB. A local run (`-profile local --chrom all`) is
+untested and needs more memory and disk than chr21: raise the local caps
+with `-c` ([Local resources](#regenerating-the-index-nextflow)), give Docker
+(or the Colima VM) the memory, and expect the work directory to hold tens of
+GB. `-resume` continues a stopped run by re-running only the tasks that did
+not finish, and the launcher has to stay up for the whole run.
+
+The commands below are for that run with ClinVar only (`--datasets
+clinvar`), reusing the ClinVar lookups of 2026-10-24
+(`data/clinvar/20261019/chunks`, 19 chunk files, 366 MB) as `--cache`, so
+only the sites they did not answer are looked up again. Without `--genome`
+the run builds the genome from UCSC `hg38.fa.gz` and publishes it in
+`genome/`. Replace the values in angle brackets.
+
+On SLURM, copy the cache to the shared filesystem, then launch from a
+directory there (`./work` must be visible to every node):
+
+```bash
+rsync -a data/clinvar/20261019/chunks/ <shared>/clingen/cache/clinvar-20261019/
+mkdir -p <shared>/clingen/pc_exons && cd <shared>/clingen/pc_exons
+nextflow run <checkout>/pipeline -profile slurm --chrom all --regions pc_exons --datasets clinvar \
+  --cache <shared>/clingen/cache/clinvar-20261019 \
+  --slurm_queue <partition> --network_queue <partition with internet> \
+  --container ghcr.io/<you>/clingen-index:0.1.0 \
+  --outdir <shared>/clingen/results/pc_exons -resume
+```
+
+On AWS Batch, with the stack, image and launcher of
+[`docs/aws-batch.md`](docs/aws-batch.md) and its `BUCKET`, `QUEUE` and `REPO`
+variables, upload the cache to the stack's bucket, then launch:
+
+```bash
+aws s3 sync data/clinvar/20261019/chunks/ "s3://$BUCKET/cache/clinvar-20261019/"
+nextflow run pipeline -profile awsbatch --chrom all --regions pc_exons --datasets clinvar \
+  --cache "s3://$BUCKET/cache/clinvar-20261019" \
+  --aws_queue "$QUEUE" --container "$REPO:0.1.0" \
+  -work-dir "s3://$BUCKET/work" --outdir "s3://$BUCKET/results/pc_exons" -resume
+```
+
+Either way the run makes at least 60,328 region requests on the one
+`ENUMERATE` stream (about 20 to 31 hours, as above) plus the lookups of the
+ClinVar sites the cache does not answer, and publishes in `--outdir`:
+`index/` (`caid.fst`, about 4.8 GB, `manifest.json` and `metadata.json`),
+`keys/` (25 shards, about 3.1 GB), `genome/`, `harvest/`, `reports/` and
+`pipeline_info/`. Check it with `reports/summary.md` (the gate and one row
+per chromosome), then rebuild it from `keys/` (on AWS, after
+`aws s3 sync "s3://$BUCKET/results/pc_exons" pc_exons`):
+
+```bash
+bash pipeline/tests/check_rebuild.sh <shared>/clingen/results/pc_exons   # or: pc_exons
+```
+
+which needs about 24 GB of temporary space (`TMPDIR`) for the unpacked
+shards and the new index. Checked offline on 2026-10-26: the SLURM command,
+with `-profile slurm,host -stub` and `pipeline/tests/slurm.config` added and
+a local copy of the cache, ran through the `sbatch`/`squeue`/`scancel` shims
+of `pipeline/tests/run_slurm_shim.sh` (210 jobs, 53 of them on the network
+partition: `ENUMERATE`, `LOOKUP`, `FETCH_UCSC`, `CLINVAR_SITES`,
+`FETCH_FASTA`) and published `index/` with `metadata.json`, 25 shards in
+`keys/`, and the rest; the AWS Batch command's parameters, resolved with
+`nextflow config` through `conf/awsbatch.config`, give the `awsbatch`
+executor, the queue, the ECR image and `us-east-1`. Neither has run on a
+real cluster or AWS account, and an `s3://` `--cache` is untested.
 
 ### Limits
 
@@ -1033,10 +1227,13 @@ run.
 
 ### Tests
 
-`nf-test test` in `pipeline/` runs 100 tests offline (every process, and stub
-and real workflow runs against a mock Registry; 100 passed in 259 s on
-2026-10-25). `nf-test test tests-network/workflow_mt.nf.test` there runs the
-workflow on chrM against the live Registry. `bash
+`nf-test test` in `pipeline/` runs 117 tests offline (every process, the
+functions that assemble `index/metadata.json`, and stub and real workflow
+runs against a mock Registry, whose published `keys/` the real runs rebuild
+with `pipeline/tests/check_rebuild.sh`; 117 passed in 340 s on 2026-10-26).
+`nf-test test tests-network/workflow_mt.nf.test` there runs the workflow on
+chrM against the live Registry, checks its `metadata.json` and `keys/`, and
+rebuilds its index from `keys/` (passed on 2026-10-26: 8,695 keys). `bash
 pipeline/tests/run_slurm_shim.sh` runs the `slurm` profile through
 `sbatch`/`squeue`/`scancel` shims that run the jobs locally, and checks each
 job's partition and time limit; `bash pipeline/tests/check_profiles.sh`
