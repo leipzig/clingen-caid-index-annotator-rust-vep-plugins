@@ -977,13 +977,16 @@ from the window starting at 10,521,332).
 
 After `tool` gained the binary's sha256 and `build_source`, the same
 command (session `1f25d9d8`, the stand-in's `--registry_url` again, with
-nothing listening there) was resumed once more on 2026-10-25: every
-`ENUMERATE` and `LOOKUP` task came back cached, and only `DIGEST` and
-`FINALIZE` ran (`completed=2 failed=0 cached=15`, 12 s). `caid.fst` is
-still `fee1e8364418752fb8f8fc2f2f1384ed`, and `metadata.json` records the
-image's binary as sha256 `b2acd6afd421…` on `Linux aarch64`.
+nothing listening there) was resumed twice more on 2026-10-25, first from
+the uncommitted change (only `DIGEST` and `FINALIZE` ran: `completed=2
+failed=0 cached=15`, 12 s), then at `f997c55` with a clean tree (only
+`FINALIZE` ran: `completed=1 failed=0 cached=16`, 4 s). Every `ENUMERATE`
+and `LOOKUP` task came back cached both times. `caid.fst` is still
+`fee1e8364418752fb8f8fc2f2f1384ed`, and `metadata.json` records the image's
+binary as sha256 `b2acd6afd421…` on `Linux aarch64`, `git_commit`
+`f997c55` and `git_dirty` false.
 
-`results/chr21-meta/index/metadata.json` is 35,953 bytes (27,350 before
+`results/chr21-meta/index/metadata.json` is 35,950 bytes (27,350 before
 `tool` gained `build_source`'s file list), and
 `keys/NC_000021.9.tsv.gz` 34,530,254 bytes (209,452,251 unpacked, 5,212,187
 lines). `bash pipeline/tests/check_rebuild.sh results/chr21-meta`, with
