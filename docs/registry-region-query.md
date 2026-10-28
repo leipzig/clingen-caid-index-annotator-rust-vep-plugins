@@ -127,7 +127,7 @@ the same alleles whether or not it has to split:
 | default (`--page-size 200000`) | `windows=1 requests=1 splits=0 alleles=59036 reference=18400 no_grch38_hgvs=0 written=40636` | 40,636 | 40,636 |
 
 The two outputs hold exactly the same rows (`comm -3` prints nothing), and
-both contain the two alleles the skip-paged fetch lost. The offline tests
+both contain the two alleles the skip-paged fetch lost. The tests
 `enumerate_splits_a_full_window`,
 `enumerate_splits_a_full_half_again_first_half_first` and
 `enumerate_fails_when_a_full_window_cannot_shrink`

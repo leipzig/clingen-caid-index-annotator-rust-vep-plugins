@@ -416,7 +416,7 @@ in `metadata.json`): a Mac build is not, and may still write the same bytes, so
 the md5s decide. A rerun of the pipeline would not reproduce the index, as the
 Registry keeps gaining alleles; README.md, Reproducing an index, explains.
 
-What was checked offline (2026-10-25), since no AWS account was used: these
+What was checked on 2026-10-25, without an AWS account: these
 parameters, resolved with `nextflow config` through `conf/awsbatch.config`, give
 the `awsbatch` executor, the queue, the ECR image and `us-east-1`; and the same
 parameters with a local cache ran as a stub on the `slurm` profile through the
