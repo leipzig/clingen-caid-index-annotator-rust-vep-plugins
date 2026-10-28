@@ -22,12 +22,12 @@ padded), but it has exactly one canonical HGVS, and so one CA ID.
 ## Quickstart
 
 Annotate [`examples/toy.vcf`](examples/toy.vcf), six GRCh38 variants, with
-CA IDs. It needs Rust (the toolchain `rust-toolchain.toml` pins, 1.94.1),
-`bash`, `curl`, `awk`, Python ≥ 3.9 and network access, and the three
-repositories side by side:
+CA IDs. It needs Rust 1.94.1 or newer as your default toolchain (clingen's
+`rust-toolchain.toml` pins 1.94.1), `bash`, `curl`, `awk`, Python ≥ 3.9,
+network access, and the three repositories side by side:
 
 ```
-clingen/   this repo, branch main
+clingen/   this repo
 vep-rs/    branch main
 fastVEP/   branch master
 ```
@@ -78,7 +78,7 @@ bad_ref    21     10000000  A    G    ERROR:IncorrectReferenceAllele  -
 ```
 
 `data/toy_lookup/chunks/chunk_00000.tsv` holds the full answer, with the
-GRCh37 HGVS as well.
+GRCh37 HGVS where the Registry has one.
 
 **3. The index.**
 
@@ -146,9 +146,14 @@ melas	FV_CLINGEN=G|CA120560|NC_012920.1:m.3243A>G
 bad_ref	.
 ```
 
-vep-rs logs the same `ClinGen:` line, which `--quiet` hides. To see it, run
-the vep-rs command without `--quiet`, with `NO_COLOR=1` to keep colour codes
-out of the log:
+vep-rs logs the same `ClinGen:` line, which `--quiet` hides. To see it, leave
+out `--quiet`; `NO_COLOR=1` keeps colour codes out of the log:
+
+```bash
+NO_COLOR=1 ../vep-rs/target/release/vep -i examples/toy.vcf -o data/toy/vep-rs.vcf \
+    --vcf --assembly GRCh38 --force_overwrite --no_stats \
+    --plugin ClinGen,index=data/index_toy 2>&1 | grep 'ClinGen:'
+```
 
 ```
 2026-10-28T15:32:56.066137Z  INFO vep_builtins::plugins::clingen: ClinGen: found=4 not_in_index=1 ref_mismatch=1 unsupported=0
