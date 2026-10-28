@@ -1392,48 +1392,18 @@ primary contig, and run exactly as in the [end-to-end
 check](#end-to-end-check), with `index=data/index_corpus` and
 `--sa-dir data/sa_corpus`.
 
-### Why most ClinVar records have no CA ID
+### CA IDs in ClinVar lag the Registry
 
-ClinVar's VCF has no CA ID column. A CA ID appears only as one of the
-cross-references in `CLNVI`, which the header describes as "the variant's
-clinical sources reported as tag-value pairs of database and variant
-identifier", for example `CLNVI=ClinGen:CA502008`. In the 2026-10-19 file,
-2,882,866 of 4,599,326 records (62.7%) have a `ClinGen:` entry, never more
-than one, and 1,716,460 (37.3%) have none.
+ClinVar's VCF has no CA ID column. A CA ID appears only as a `ClinGen:`
+entry in `CLNVI`, for example `CLNVI=ClinGen:CA502008`. Those entries lag
+the Registry: in the 2026-10-19 file, 1,716,460 of 4,599,326 records
+(37.3%) have none, yet 1,712,474 of the 1,714,424 among them that we looked
+up are already registered. They are mostly recent records (median ALLELEID
+4,259,556, against 1,670,103 for records with a CA ID). In 11 records,
+`CLNVI` names a CA ID other than the one the Registry returns now.
 
-A missing entry doesn't mean the allele is unregistered:
-
-| ClinVar records | records | looked up | registered | median ALLELEID |
-|---|---:|---:|---:|---:|
-| with `ClinGen:CA…` | 2,882,866 | 2,882,842 | 2,882,840 | 1,670,103 |
-| without | 1,716,460 | 1,714,424 | 1,712,474 (99.9%) | 4,259,556 |
-
-`looked up` leaves out the records set aside [above](#clinvar-coverage)
-(`ALT=.`, non-ACGT, patch contigs). Of the 1,952 alleles the Registry
-doesn't know, 1,950 are in records without a cross-reference.
-
-The records without one have much higher ALLELEIDs. ClinVar assigns
-ALLELEIDs in order, so these are mostly recent submissions. That fits a lag
-in which ClinVar adds the cross-reference some time after the allele is in
-the Registry, but neither ClinVar's [VCF
-documentation](https://www.ncbi.nlm.nih.gov/variation/docs/ClinVar_vcf_files)
-nor ClinGen's [Registry
-documentation](https://actionability.clinicalgenome.org/redmine/projects/clingen-allele-registry/wiki/VCF_gnomAD)
-says how or when the entry is added. We haven't confirmed the mechanism.
-
-Where both name a CA ID, 2,882,829 agree and 11 differ. Nine of the 11 lie
-in X's pseudoautosomal region 1. Three examples:
-
-| site | ClinVar `CLNVI` | Registry |
-|---|---|---|
-| 10:111078198 C>T | CA15640895 | CA378524204 |
-| 19:39902243 G>A | CA9437201 | CA308273348 |
-| X:1282720 C>A | CA2580102058 | CA412234362 |
-
-So the index doesn't take CA IDs from `CLNVI`. A third of the records have
-none, and a few name a CA ID other than the one the Registry returns now.
-The pipeline looks up every ClinVar site in the Registry, and `CLNVI` serves
-only as a cross-check.
+This tool closes that gap: it looks up every ClinVar site in the Registry
+itself, so a record gets its CA ID whether or not ClinVar has added one yet.
 
 ## Known limitations
 
